@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 from .errors import BridgeError
@@ -17,11 +18,16 @@ class Journal:
                        "state TEXT NOT NULL, process_id TEXT, result_json TEXT, PRIMARY KEY(execution_id, op_id))")
         os.chmod(self.path, 0o600)
 
+    @contextmanager
     def _connection(self):
         db = sqlite3.connect(self.path, timeout=20)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA synchronous=FULL")
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def begin(self, execution_id, op_id, fingerprint):
         with self._connection() as db:

@@ -5,7 +5,7 @@ import zipfile
 from pathlib import Path
 
 from .errors import BridgeError
-from .redact import StreamRedactor
+from .redact import StreamRedactor, redact_bytes
 from .storage import file_lock, private_dir, write_json
 
 
@@ -14,6 +14,7 @@ class Artifacts:
         self.root = private_dir(Path(root))
         self.secrets, self.shard_size = secrets, shard_size
         self.redactors = {}
+        self.hashes = {}
 
     def manifest(self):
         path = self.root / "manifest.json"
@@ -43,16 +44,28 @@ class Artifacts:
                     stream.flush()
                     os.fsync(stream.fileno())
                 item["size"] += count
-                item["sha256"] = hashlib.sha256((self.root / item["file"]).read_bytes()).hexdigest()
+                digest = self.hashes.get(refs[-1])
+                if digest is None:
+                    digest = hashlib.sha256()
+                    with (self.root / item["file"]).open("rb") as existing:
+                        while chunk := existing.read(1024 * 1024):
+                            digest.update(chunk)
+                    self.hashes[refs[-1]] = digest
+                else:
+                    digest.update(data[:count])
+                item["sha256"] = digest.hexdigest()
                 data = data[count:]
             write_json(self.root / "manifest.json", manifest)
             return list(refs)
 
     def put(self, data: bytes):
+        data = redact_bytes(data, self.secrets)
         stream_id = "content-" + hashlib.sha256(data).hexdigest()
-        self.append(stream_id, data)
-        self.finish(stream_id)
-        return self.manifest()["streams"][stream_id]
+        with file_lock(self.root / ".put.lock"):
+            existing = self.manifest()["streams"].get(stream_id)
+            if existing is not None:
+                return existing
+            return self._append(stream_id, data)
 
     def read(self, ref, offset=0, limit=65536):
         with file_lock(self.root / ".lock"):

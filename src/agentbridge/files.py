@@ -26,10 +26,12 @@ class FileTools:
 
     def _bytes(self, path):
         with self.workspace.parent(path) as (parent, name):
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
             with os.fdopen(fd, "rb") as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     raise BridgeError("file_not_regular", "只能读取普通文件")
+                if os.fstat(stream.fileno()).st_size > 64 * 1024 * 1024:
+                    raise BridgeError("file_too_large", "文本编辑与读取限 64 MiB；大文件请使用本机命令")
                 data = stream.read()
             return data
 
@@ -70,7 +72,7 @@ class FileTools:
             mode = 0o644
             before = None
             try:
-                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
             except FileNotFoundError:
                 if not create:
                     raise BridgeError("file_conflict", "新文件需要明确创建") from None
