@@ -15,6 +15,8 @@ agentbridge doctor --request-file /absolute/private/request.json --test-tools
 
 远端部署按本机 wheel 摘要建立私有运行目录和 venv，监督器只使用标准库；不依赖系统 pip/ensurepip，不安装系统软件包。Claude 的模型密钥由 VPS 自己管理，不写入宿主池的 SSH 连接配置。
 
+VPS 保存 Claude 会话缓存和监督元数据，用于续接；MCP 返回的项目上下文会进入远端会话。本机保留完整审计镜像，项目文件本身及 Git、构建、测试的执行位置仍在本机。
+
 ## 运行、停止与续接
 
 ```sh
