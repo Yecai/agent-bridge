@@ -9,6 +9,7 @@ import time
 from uuid import uuid4
 
 from .errors import BridgeError
+from .procutil import group_alive, start_marker, stop_group
 from .storage import private_dir, write_json
 
 
@@ -49,7 +50,7 @@ class ProcessManager:
             process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
             row = {"process_id": process_id, "execution_id": spec.execution_id, "pid": process.pid,
-                   "state": "running", "exit_code": None, "op_id": op_id}
+                   "state": "running", "exit_code": None, "op_id": op_id, "start_marker": start_marker(process.pid)}
             self.rows[process_id] = {"row": row, "process": process, "done": False}
             write_json(self.root / f"{process_id}.json", row)
             self.runtime.journal.bind_process(spec.execution_id, op_id, process_id)
@@ -84,6 +85,8 @@ class ProcessManager:
         timer.start()
         try:
             code = proc.wait()
+            if group_alive(proc.pid):
+                stop_group(proc, item['row']['start_marker'])
             for reader in readers:
                 reader.join()
             with self.condition:
@@ -122,17 +125,11 @@ class ProcessManager:
             proc = item["process"]
             self.runtime.audit.append("process.stop", "running", {"reason": reason}, process_id=process_id)
         if not item["done"]:
-            for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
-                try:
-                    os.killpg(proc.pid, sig)
-                except ProcessLookupError:
-                    pass
-                deadline = time.monotonic() + wait
-                with self.condition:
-                    while not item["done"] and time.monotonic() < deadline:
-                        self.condition.wait(timeout=0.05)
-                if item["done"]:
-                    break
+            stop_group(proc, item['row']['start_marker'])
+            deadline = time.monotonic() + 10
+            with self.condition:
+                while not item['done'] and time.monotonic() < deadline:
+                    self.condition.wait(timeout=.05)
         if not item["done"]:
             raise BridgeError("stop_unconfirmed", "无法确认命令进程组已退出")
         return dict(item["row"])

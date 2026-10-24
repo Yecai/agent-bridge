@@ -2,7 +2,7 @@
 name = "agentbridge"
 version = "0.1.0"
 description = "Run remote Claude Code against a local workspace over SSH and MCP"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = ["mcp>=1.25,<2", "asyncssh>=2.20,<3", "pydantic>=2,<3", "starlette>=0.40,<2", "uvicorn>=0.30,<1", "httpx>=0.28,<1"]
 
 [project.scripts]

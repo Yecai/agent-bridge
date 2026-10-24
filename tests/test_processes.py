@@ -47,3 +47,23 @@ def test_stop_and_foreign_process(manager, spec):
     assert stopped["state"] == "exited"
     with pytest.raises(BridgeError, match="process_not_found"):
         manager.output("foreign", 0, 0)
+
+
+def test_exited_leader_does_not_leave_child(manager, spec):
+    import os
+    import sys
+    from agentbridge.processes import ProcessManager
+    from agentbridge.procutil import group_alive
+    row = manager.start([sys.executable, '-c', 'import subprocess,sys;subprocess.Popen([sys.executable,"-c","import time;time.sleep(30)"])'],
+                        cwd=str(spec.cwd), op_id='child-tree', timeout=10)
+    import time
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        output = manager.output(row['process_id'], wait_seconds=1)
+        if output['state'] == 'exited':
+            break
+    try:
+        assert output['state'] == 'exited'
+        assert not group_alive(row['pid'])
+    finally:
+        manager.stop_all()
