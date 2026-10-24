@@ -46,7 +46,7 @@ print(json.dumps({'python':str(python),'sha256':digest,'root':str(root)}))
 '''
 
 
-def wheel_path():
+def wheel_path(runtime=None):
     explicit = os.environ.get('AGENTBRIDGE_WHEEL')
     if explicit:
         path = Path(explicit).resolve(strict=True)
@@ -57,15 +57,21 @@ def wheel_path():
     if not (project / 'pyproject.toml').is_file():
         raise BridgeError('wheel_required', '已安装发行版需通过 AGENTBRIDGE_WHEEL 指定验收 wheel')
     directory = Path(tempfile.mkdtemp(prefix='agentbridge-build-'))
-    result = subprocess.run(['uv', 'build', '--wheel', '--out-dir', str(directory)], cwd=project,
+    if runtime is not None:
+        runtime.audit.append('local.build', 'running')
+    result = subprocess.run(['uv', 'build', '--offline', '--wheel', '--out-dir', str(directory)], cwd=project,
                             capture_output=True, timeout=60)
+    if runtime is not None:
+        refs = runtime.artifacts.put(result.stdout + b'\n' + result.stderr)
+        runtime.audit.append('local.build', 'ok' if result.returncode == 0 else 'error',
+                             {'exit_code': result.returncode}, artifact_refs=refs)
     if result.returncode:
         raise BridgeError('build_failed', 'AgentBridge wheel 构建失败')
     return next(directory.glob('*.whl'))
 
 
 async def deploy(connection, runtime=None):
-    wheel = await asyncio.to_thread(wheel_path)
+    wheel = await asyncio.to_thread(wheel_path, runtime)
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
     async with connection.start_sftp_client() as sftp:
         home = await sftp.realpath('.')

@@ -39,3 +39,23 @@ async def test_private_control_identity(tmp_path):
             assert 'control_lost' in str(exc)
         else:
             assert False
+
+
+async def test_interactive_child_has_controlling_terminal(tmp_path):
+    import time
+    remote=RemoteExecution(tmp_path,'pty-execution',0,ttl=2)
+    script='import os; fd=os.open("/dev/tty",os.O_RDWR); print("tty-ready",flush=True); print(input(),flush=True)'
+    await remote.handle({'action':'start','argv':[sys.executable,'-c',script],'cwd':str(tmp_path),'mode':'interactive'})
+    try:
+        await remote.handle({'action':'input','data':base64.b64encode(b'hello-pty\n').decode()})
+        deadline=time.monotonic()+3
+        while remote.row['state']=='running' and time.monotonic()<deadline:
+            await asyncio.sleep(.02)
+        output=await remote.handle({'action':'events','cursor':0})
+        assert remote.row.get('exit_code')==0,base64.b64decode(output['stdout'])
+        assert b'tty-ready' in base64.b64decode(output['stdout'])
+        assert b'hello-pty' in base64.b64decode(output['stdout'])
+    finally:
+        await remote.handle({'action':'cancel'})
+        if remote.master is not None:
+            os.close(remote.master)

@@ -134,6 +134,11 @@ async def run_cli(spec):
 
 def main():
     # Remote actions remain stdlib-only; local dependencies are loaded lazily.
+    if len(sys.argv) > 2 and sys.argv[1] == '_pty':
+        import fcntl
+        import termios
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
     if len(sys.argv) > 1 and sys.argv[1] in {'_remote', '_remote-daemon'}:
         from .relay import remote_command, daemon
         try:

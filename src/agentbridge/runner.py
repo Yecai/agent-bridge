@@ -30,6 +30,7 @@ class Runner:
         self.connection, self.remote_python, self.remote_port = None, None, None
         self.on_status = on_status or (lambda row: None)
         self.result, self.remote_status = None, None
+        self.remote_start_requested = False
         self.remote_cursor = {'stdout': 0, 'stderr': 0}
         self.parser = JsonLines()
 
@@ -107,6 +108,7 @@ class Runner:
                     self.remote_python = deployment['python']
                     runtime.audit.append('remote.deployed', 'ok', {'wheel_sha256': deployment['sha256']})
                     remote_root = await self._configure(deployment)
+                    self.remote_start_requested = True
                     row = await self.remote('start', argv=build_argv(spec, remote_root + '/mcp.json', remote_root + '/settings.json'),
                                             cwd=remote_root, mode=spec.mode, prompt=context_prompt(spec), secrets=[runtime.token])
                     self.remote_status = row
@@ -145,6 +147,9 @@ class Runner:
                         raise BridgeError('result_missing', 'Claude 未返回最终结构化事件')
                     if self.result and self.result.get('is_error'):
                         code = 1
+        except asyncio.CancelledError:
+            error_code = 'cancelled'
+            raise
         except Exception as exc:
             error_code = exc.code if isinstance(exc, BridgeError) else 'bridge_failed'
             runtime.audit.append('execution.error', 'error', {'error_type': type(exc).__name__}, error_code=error_code)
@@ -160,7 +165,7 @@ class Runner:
             for event in self.parser.finish():
                 self.event(event)
             # A failure before any remote spawn needs no remote stop confirmation.
-            if self.remote_status is None and error_code not in {'remote_control_failed', 'outcome_unknown'}:
+            if not self.remote_start_requested:
                 remote_stopped = True
             stopped = local_stopped and remote_stopped
             data = {key: (self.result or {}).get(key) for key in ('result', 'structured_output', 'usage', 'num_turns')}
@@ -169,4 +174,4 @@ class Runner:
             final = {'state': 'exited' if stopped else 'stop_unconfirmed', 'exit_code': code,
                      'error_code': error_code, 'session_id': spec.session_id, 'stop_confirmed': stopped}
             self.on_status(final)
-            return final
+        return final

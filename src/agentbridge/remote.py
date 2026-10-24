@@ -7,6 +7,7 @@ import os
 import pty
 import struct
 import subprocess
+import sys
 import termios
 import threading
 from pathlib import Path
@@ -83,7 +84,9 @@ class RemoteExecution:
             env.pop('CLAUDECODE', None)
             if frame['mode'] == 'interactive':
                 self.master, slave = pty.openpty()
-                self.proc = subprocess.Popen(argv, cwd=frame['cwd'], env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+                self.proc = subprocess.Popen([sys.executable, '-m', 'agentbridge', '_pty', *argv],
+                                             cwd=frame['cwd'], env=env, stdin=slave, stdout=slave, stderr=slave,
+                                             start_new_session=True)
                 os.close(slave)
                 streams = [('stdout', self.master)]
             else:
