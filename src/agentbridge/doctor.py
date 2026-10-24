@@ -15,6 +15,8 @@ from .ssh import connect_target
 from .storage import atomic_write, file_lock, private_dir, write_json
 
 CHECKS = ('ssh', 'host_identity', 'python', 'claude_auth', 'mcp_roundtrip', 'print_schema', 'interactive_audit', 'stop_confirmation')
+REQUIRED_FLAGS = ('--tools', '--strict-mcp-config', '--settings', '--setting-sources', '--disable-slash-commands',
+                  '--json-schema', '--session-id', '--resume', '--dangerously-skip-permissions')
 PROBE = r'''
 import json,subprocess,sys
 request=json.load(sys.stdin)
@@ -166,9 +168,8 @@ async def doctor(spec, *, test_tools=False):
             result['checks']['claude_auth'] = {'status': 'untested' if configured else 'failed', 'configured': configured,
                                               'detail': '配置存在不代表模型认证通过；需真实模型调用验证'}
             help_text = probe.get('help', {}).get('stdout', '')
-            required = ('--tools', '--strict-mcp-config', '--settings', '--setting-sources', '--disable-slash-commands', '--json-schema', '--session-id', '--resume')
             result['claude'] = {'version': probe.get('version', {}).get('stdout', '').strip(),
-                                'missing_flags': [flag for flag in required if flag not in help_text]}
+                                'missing_flags': [flag for flag in REQUIRED_FLAGS if flag not in help_text]}
     except BridgeError as exc:
         result['error_code'] = exc.code
         check = 'python' if exc.code == 'python_unavailable' else 'ssh'

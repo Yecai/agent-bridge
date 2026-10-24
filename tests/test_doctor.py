@@ -80,3 +80,7 @@ async def test_python_probe_failure_keeps_successful_ssh_identity(spec,monkeypat
     assert result['checks']['host_identity']['status']=='ok'
     assert result['checks']['python']['status']=='failed'
     assert result['error_code']=='python_unavailable'
+
+
+def test_required_flags_include_skip_permissions():
+    assert '--dangerously-skip-permissions' in module.REQUIRED_FLAGS
