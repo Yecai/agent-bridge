@@ -171,6 +171,10 @@ class AuthGate:
         if body:
             refs = self.runtime.artifacts.put(bytes(body))
             self.runtime.audit.append("mcp.request", "received", {}, artifact_refs=refs)
+        try:
+            request_method = json.loads(body).get('method')
+        except (ValueError, AttributeError):
+            request_method = None
         response = bytearray()
         response_status = 200
 
@@ -191,6 +195,8 @@ class AuthGate:
                     except ValueError:
                         failed = response_status >= 400
                     self.runtime.audit.append("mcp.response", "error" if failed else "ok", {}, artifact_refs=refs)
+                    if request_method == 'tools/list' and not failed:
+                        self.runtime.mcp_ready = True
             await send(message)
 
         await self.app(scope, replay, captured)

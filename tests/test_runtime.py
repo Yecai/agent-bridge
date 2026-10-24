@@ -145,3 +145,12 @@ def test_host_action_freezes_mutations_until_controlled_ack(spec, monkeypatch):
     assert runtime.requested_stop
     runtime.hook({'hook_event_name':'PostToolUse','tool_name':'mcp__local__dev_finish','tool_input':{'op_id':'finish-op'}})
     assert len(acked)==1
+
+
+def test_claude_auth_retry_is_terminal_and_audited_as_error(spec):
+    from agentbridge.runner import Runner
+    runner=Runner(spec)
+    runner.event({'type':'system','subtype':'api_retry','error_status':401,'error':'authentication_failed'})
+    assert runner.cancelled.is_set()
+    assert runner.fatal_error.code=='auth'
+    assert runner.runtime.audit.read()['events'][-1]['status']=='error'

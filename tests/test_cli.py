@@ -83,3 +83,40 @@ async def test_local_daemon_keeps_interactive_input_until_remote_ready(spec,tmp_
             running.cancel()
             try:await running
             except asyncio.CancelledError:pass
+
+
+async def test_cli_drains_final_event_when_status_finishes_after_previous_page(spec,tmp_path,monkeypatch,capsys):
+    from agentbridge import cli,state
+    from agentbridge.storage import write_json
+    monkeypatch.setenv('AGENTBRIDGE_STATE',str(tmp_path/'state'))
+    write_json(state.execution(spec.execution_id)/'status.json',{'stop_confirmed':True})
+    monkeypatch.setattr(cli,'ensure_request_identity',lambda request:None)
+    reads=0
+    async def command(execution_id,action,**fields):
+        nonlocal reads
+        if action=='events':
+            reads+=1
+            event='execution.accepted' if reads==1 else 'bridge.result'
+            return {'events':[{'event':event}], 'next_cursor':reads,'complete':True}
+        if action=='status':
+            return {'state':'running' if reads==0 else 'exited','stop_confirmed':True,'exit_code':0}
+        return {}
+    monkeypatch.setattr(cli,'command',command)
+    assert await cli.run_cli(spec)==0
+    assert [json.loads(line)['event'] for line in capsys.readouterr().out.splitlines()]==['execution.accepted','bridge.result']
+
+
+async def test_cli_reports_partial_audit_and_exits_when_execution_already_stopped(spec,tmp_path,monkeypatch,capsys):
+    import asyncio
+    from agentbridge import cli,state
+    from agentbridge.storage import write_json
+    monkeypatch.setenv('AGENTBRIDGE_STATE',str(tmp_path/'state'))
+    write_json(state.execution(spec.execution_id)/'status.json',{'stop_confirmed':True})
+    monkeypatch.setattr(cli,'ensure_request_identity',lambda request:None)
+    async def command(execution_id,action,**fields):
+        if action=='events':return {'events':[],'next_cursor':0,'complete':False,'gaps':[{'reason':'partial_line'}]}
+        if action=='status':return {'state':'exited','stop_confirmed':True,'exit_code':0}
+        return {}
+    monkeypatch.setattr(cli,'command',command)
+    assert await asyncio.wait_for(cli.run_cli(spec),.5)==1
+    assert json.loads(capsys.readouterr().out)['event']=='log.gap'

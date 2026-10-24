@@ -37,3 +37,25 @@ def test_artifacts_preserve_all_output_and_export(tmp_path):
     assert len(store.manifest()["streams"]["out"]) > 1
     assert b"fixture-password" not in b"".join(p.read_bytes() for p in (tmp_path / "artifacts").glob("*.bin"))
     assert output["next_cursor"] == len(output["data"])
+
+
+def test_native_key_confirmation_suffix_is_redacted():
+    from agentbridge.redact import StreamRedactor, environment_secrets
+    secret='sk-fixture-key-0123456789abcdefghij'
+    public=('ANTHROPIC_API_KEY: sk-ant-...'+secret[-20:]+'\n').encode()
+    redactor=StreamRedactor(environment_secrets({'ANTHROPIC_API_KEY':secret}))
+    output=redactor.feed(public[:30])+redactor.feed(public[30:])+redactor.finish()
+    assert secret[-20:].encode() not in output
+    assert b'[REDACTED]' in output
+
+
+def test_audit_reports_sequence_holes_across_page_boundaries(tmp_path):
+    from agentbridge.audit import AuditLog
+    log=AuditLog(tmp_path,{})
+    for _ in range(3):log.append('event','ok')
+    first=log.read(limit=1)
+    path=tmp_path/'trace.jsonl'
+    lines=path.read_bytes().splitlines(keepends=True)
+    path.write_bytes(lines[0]+lines[2])
+    result=log.read(first['next_cursor'])
+    assert result['gaps']==[{'file':'trace.jsonl','reason':'sequence_gap','expected':2,'actual':3}]

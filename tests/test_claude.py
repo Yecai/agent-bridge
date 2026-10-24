@@ -47,3 +47,69 @@ def test_remote_workspace_is_stable_across_execution_ids(spec):
     assert remote_workspace('/remote/home',spec)==first
     spec.client_id='different-client'
     assert remote_workspace('/remote/home',spec)!=first
+
+
+def test_only_configured_schema_can_use_the_output_formatter(spec):
+    event={'hook_event_name':'PreToolUse','tool_name':'StructuredOutput','tool_input':{'passed':True}}
+    assert decide(event,spec.execution_id)['hookSpecificOutput']['permissionDecision']=='deny'
+    assert decide(event,spec.execution_id,allow_structured=True)['hookSpecificOutput']['permissionDecision']=='allow'
+    for native in ['Bash','Read','Write','StructuredOutputOther']:
+        assert decide({**event,'tool_name':native},spec.execution_id,allow_structured=True)['hookSpecificOutput']['permissionDecision']=='deny'
+
+
+async def test_interactive_prompt_waits_for_controlled_session_start(spec):
+    import base64
+    from agentbridge.runner import Runner
+    spec.mode='interactive';spec.prompt='initial prompt'
+    runner=Runner(spec);runner.remote_cwd='/remote/bridge-workspace'
+    inputs=[]
+    async def remote(action, **fields):
+        inputs.append(base64.b64decode(fields['data']))
+        return {}
+    runner.remote=remote
+    await runner._interactive_startup(b'Accessing workspace: /other/workspace Quick safety check: \xe2\x9d\xaf No, exit Yes, I trust this folder')
+    assert not inputs
+    await runner._interactive_startup(b'\nAccessing workspace: /remote/bridge-workspace Quick safety check: \xe2\x9d\xaf No, exit Yes, I trust this folder')
+    assert inputs==[b'\x1b[B\r']
+    await runner._interactive_startup(b'')
+    assert len(inputs)==1
+    runner.runtime.hook({'hook_event_name':'SessionStart','session_id':'other-session'})
+    await runner._interactive_startup(b'')
+    assert len(inputs)==1
+    runner.runtime.hook({'hook_event_name':'SessionStart','session_id':spec.session_id})
+    await runner._interactive_startup(b'')
+    assert inputs[-2].endswith(b'initial prompt\x1b[201~')
+    assert inputs[-1]==b'\r'
+    await runner._interactive_startup(b'')
+    assert len(inputs)==3
+
+
+async def test_interactive_ready_screen_handles_deferred_session_start(spec):
+    import base64
+    from agentbridge.runner import Runner
+    spec.mode='interactive';spec.prompt='a\x1b[201~b'
+    runner=Runner(spec);runner.runtime.mcp_ready=True
+    inputs=[]
+    async def remote(action, **fields):
+        inputs.append(base64.b64decode(fields['data']))
+    runner.remote=remote
+    await runner._interactive_startup(b'Claude Code v2.1.310\r\n\xe2\x9d\xaf Try a prompt')
+    assert len(inputs)==2
+    assert inputs[0].count(b'\x1b[201~')==1
+    assert inputs[0].startswith(b'\x1b[200~')
+    assert inputs[-1]==b'\r'
+
+
+async def test_interactive_startup_never_sends_work_after_cancel_or_revocation(spec):
+    from agentbridge.runner import Runner
+    spec.mode='interactive';spec.prompt='must-not-send'
+    for revoke in [False,True]:
+        runner=Runner(spec)
+        runner.runtime.session_ready=True
+        inputs=[]
+        async def remote(action,**fields):inputs.append(action)
+        runner.remote=remote
+        if revoke:runner.runtime.revoke()
+        else:runner.cancelled.set()
+        await runner._interactive_startup(b'')
+        assert not inputs

@@ -6,6 +6,7 @@
 uv sync --group dev
 uv run agentbridge --version
 uv run agentbridge doctor --request-file /absolute/path/request.private.json
+uv run agentbridge doctor --request-file /absolute/path/request.private.json --test-tools
 uv run agentbridge run --request-file /absolute/path/request.private.json
 uv run agentbridge status --execution EXECUTION_UUID
 uv run agentbridge cancel --execution EXECUTION_UUID
@@ -23,6 +24,10 @@ MCP 仅绑定回环地址，每次执行有独立 bearer。只读执行仅开放
 
 `run` 的短命 CLI 连接独立本机监督器；远端监督器独立拥有 Claude 进程。控制端停止心跳后租约到期回收所属进程。只在两端停止确认后标记 stopped；停止未知必须保留容量。交互模式使用 PTY，结构化事件另行存储。
 
-当前开发及验收进展见 [验证记录](docs/validation-current.md)。完整宿主节点接入、故障恢复及真实模型验收仍在进行。
+普通 `doctor` 检查主机身份、Python、Claude 版本和认证配置。`--test-tools` 会实际调用模型，在独立本机目录验证读写、命令、JSON 输出、交互 transcript 和停止确认；会产生模型用量，完整诊断保留在请求的 `log_dir`。未实际验证的检查保持 `untested`。
+
+交互初始化会识别并确认 AgentBridge 自己创建的远端私有空工作目录，业务项目始终位于本机。首次使用新 API key 时，需先完成 Claude 自身的新密钥确认，或按上游文档配置认证令牌。初始任务等待受控会话或已完成 MCP 握手的就绪界面，使用括号粘贴发送；不会把任务正文发送给目录信任界面。当前匹配实际验证过的英文启动界面，其它界面保留终端供人工处理。
+
+宿主接入覆盖八个自动开发节点，以及 devix 的计划、执行两个交互节点。使用和恢复说明见 [操作手册](docs/operations.md)，边界契约见 [协议 v1](docs/protocol-v1.md)，验证来源及限制见 [验证记录](docs/validation-current.md)。
 
 CLI 参数及 hooks 依据：[Claude CLI](https://code.claude.com/docs/en/cli-reference)、[Claude hooks](https://code.claude.com/docs/en/hooks)。部署前还需检查实际安装版本。

@@ -106,6 +106,7 @@ async def run_cli(spec):
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stopped.set)
     cursor, terminal_cursor, renewal = 0, 0, 0.
+    seen_gaps = set()
     interactive = spec.mode == 'interactive'
     old_terminal = None
     if interactive and sys.stdin.isatty():
@@ -134,7 +135,19 @@ async def run_cli(spec):
             if time.monotonic() - renewal >= 10:
                 await command(spec.execution_id, 'renew')
                 renewal = time.monotonic()
+            # Terminal status is persisted after bridge.result. Reading it first
+            # prevents completion racing past the final page of audit events.
+            status = await command(spec.execution_id, 'status')
             page = await command(spec.execution_id, 'events', cursor=cursor)
+            for gap in page.get('gaps', []):
+                identity = json.dumps(gap, sort_keys=True)
+                if identity not in seen_gaps:
+                    seen_gaps.add(identity)
+                    if interactive:
+                        print('AgentBridge 日志存在缺口，请查看诊断记录。', file=sys.stderr, flush=True)
+                    else:
+                        print(json.dumps({**spec.public_context(), 'schema_version': 1, 'event': 'log.gap',
+                                          'status': 'error', 'details': gap}, ensure_ascii=False), flush=True)
             for event in page['events']:
                 if not interactive:
                     print(json.dumps(event, ensure_ascii=False), flush=True)
@@ -144,9 +157,10 @@ async def run_cli(spec):
                 sys.stdout.buffer.write(base64.b64decode(output['data']))
                 sys.stdout.buffer.flush()
                 terminal_cursor = output['next_cursor']
-            status = await command(spec.execution_id, 'status')
             if status['state'] in {'exited', 'stop_unconfirmed'} and page['complete']:
-                return 0 if status.get('exit_code') == 0 and status.get('stop_confirmed') else 1
+                return 0 if status.get('exit_code') == 0 and status.get('stop_confirmed') and not seen_gaps else 1
+            if status['state'] in {'exited', 'stop_unconfirmed'} and not page['events'] and page.get('gaps'):
+                return 1
             await asyncio.sleep(.1)
     finally:
         if old_terminal is not None:
@@ -197,7 +211,10 @@ def main():
     parser.add_argument('--version', action='version', version=__version__)
     sub = parser.add_subparsers(dest='command', required=True)
     for name in ('run', 'doctor'):
-        sub.add_parser(name).add_argument('--request-file', required=True)
+        item = sub.add_parser(name)
+        item.add_argument('--request-file', required=True)
+        if name == 'doctor':
+            item.add_argument('--test-tools', action='store_true', help='显式调用模型，在隔离目录验证 MCP、结构化输出、交互审计及停止')
     item = sub.add_parser('trust-host')
     item.add_argument('--request-file', required=True)
     item.add_argument('--challenge', required=True)
@@ -222,7 +239,7 @@ def main():
             if args.command == 'run':
                 sys.exit(asyncio.run(run_cli(spec)))
             from .doctor import doctor, trust
-            result = trust(spec.target, args.challenge, args.fingerprint) if args.command == 'trust-host' else doctor(spec)
+            result = trust(spec.target, args.challenge, args.fingerprint) if args.command == 'trust-host' else doctor(spec, test_tools=args.test_tools)
             print(json.dumps(asyncio.run(result), ensure_ascii=False))
         elif args.command in {'status', 'cancel'}:
             print(json.dumps(asyncio.run(command(args.execution, args.command)), ensure_ascii=False))

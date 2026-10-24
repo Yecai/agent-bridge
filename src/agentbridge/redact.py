@@ -3,6 +3,17 @@ import json
 SENSITIVE = frozenset({"password", "token", "authorization", "cookie", "secret", "private_key", "callback_token"})
 
 
+def environment_secrets(env):
+    values = []
+    for name, value in env.items():
+        if name.startswith(('ANTHROPIC_', 'CLAUDE_CODE_')) and name.endswith(('KEY', 'TOKEN')) and value:
+            values.append(value.encode())
+            if name == 'ANTHROPIC_API_KEY' and len(value) > 20:
+                # Claude's first-use confirmation displays the final twenty characters.
+                values.append(value[-20:].encode())
+    return values
+
+
 class StreamRedactor:
     def __init__(self, secrets=()):
         self.secrets = sorted({s.encode() if isinstance(s, str) else s for s in secrets if s}, key=len, reverse=True)

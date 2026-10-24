@@ -19,11 +19,12 @@ def operation_id(execution_id, tool_use_id):
     return str(uuid5(UUID(execution_id), tool_use_id))
 
 
-def decide(event, execution_id):
+def decide(event, execution_id, *, allow_structured=False):
     if event.get('hook_event_name') != 'PreToolUse':
         return {}
     name = event.get('tool_name', '')
-    output = {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow' if name.startswith('mcp__local__') else 'deny'}
+    permitted = name.startswith('mcp__local__') or (name == 'StructuredOutput' and allow_structured)
+    output = {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow' if permitted else 'deny'}
     if output['permissionDecision'] == 'deny':
         output['permissionDecisionReason'] = '只能通过 AgentBridge 操作本机项目'
     elif name.removeprefix('mcp__local__') in MUTATIONS:
@@ -61,7 +62,7 @@ def main():
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=8) as response:
             if response.status != 200:
                 raise OSError('hook audit rejected')
-        print(json.dumps(decide(event, config['execution_id'])))
+        print(json.dumps(decide(event, config['execution_id'], allow_structured=config.get('allow_structured') is True)))
     except Exception:
         print('AgentBridge hook audit unavailable', file=sys.stderr)
         sys.exit(2)

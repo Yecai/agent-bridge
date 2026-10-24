@@ -1,0 +1,62 @@
+# 操作与排障
+
+## 安装和主机登记
+
+本机运行 `uv sync --group dev`，宿主配置独立 CLI 的绝对路径。当前支持 macOS/Linux 的进程组和文件锁语义；VPS 需要 Python 3.11+ 及可运行的 Claude Code。本机需要 uv、Git 和 ripgrep。
+
+请求文件置于工作区授权范围以外并设置 0600。先运行普通 doctor；未知主机会返回一次性 challenge 和 SHA256 指纹。通过独立渠道核对后执行：
+
+```sh
+agentbridge trust-host --request-file /absolute/private/request.json --challenge CHALLENGE_UUID --fingerprint SHA256:FINGERPRINT
+agentbridge doctor --request-file /absolute/private/request.json --test-tools
+```
+
+挑战十分钟内有效，只能使用一次，登记前会再次获取并核验主机密钥。主机密钥变化不得通过关闭校验解决。doctor 不执行登录或修改上游认证；认证配置存在不代表实际模型调用成功。显式工具测试在独立本机目录执行，会产生模型用量，诊断目录保留。
+
+远端部署按本机 wheel 摘要建立私有运行目录和 venv，监督器只使用标准库；不依赖系统 pip/ensurepip，不安装系统软件包。Claude 的模型密钥由 VPS 自己管理，不写入宿主池的 SSH 连接配置。
+
+## 运行、停止与续接
+
+```sh
+agentbridge run --request-file /absolute/private/request.json
+agentbridge status --execution EXECUTION_UUID
+agentbridge cancel --execution EXECUTION_UUID
+```
+
+CLI、本机监督器和远端监督器分别运行。CLI 心跳停止后，本机租约约 60 秒到期并发起清理；远端也有独立租约。本机命令还有归属管道 watchdog，拥有者被 SIGKILL 后也会停止所属进程组。外部故意脱离进程组的程序不属于完整 OS 沙箱保证。
+
+短时 SSH 断开时先撤销工具权限，再在约 40 秒内按原主机身份、执行和控制版本重连。反向隧道恢复原端口并核验回环监听后才恢复权限。交互输入回执丢失不能重放，返回 input_outcome_unknown。
+
+停止后续接需创建新的 execution_id，并保留原 session_id、machine/client/workspace 身份，设置 resume=true。远端稳定工作目录保证 Claude 找到原 transcript。不能将原 session_id 静默带到另一台机器；身份缺失、控制版本变化或停止未知都禁止重复拉起。
+
+`stop_unconfirmed/outcome_unknown` 时保留池占用。先保留诊断，再核对两端执行状态、PGID 和启动标记。不要清空状态文件、重复原命令或随意 kill 一个复用的 PID。远端监督器不可达时，须核验原执行进程是否仍存在；没有证据不能手动标为停止成功。
+
+## 日志与导出
+
+```sh
+agentbridge logs --execution EXECUTION_UUID --cursor 0
+agentbridge export --execution EXECUTION_UUID --output /absolute/private/diagnostics.zip
+```
+
+日志为独立序号的 JSONL，完整请求/响应、stdout/stderr、输入、hooks、transcript 使用分片附件及摘要清单。原始业务正文和命令输出可能很大，界面按游标取页；早期输出仍保存在附件中。附件预览和 ZIP 只读取已登记的诊断文件，不包含私有请求、回调凭据或操作账本。
+
+工作任务日志位于公司数据域，个人任务位于个人数据域，项目验收队列和预览日志也按项目数据域存放。新目录先确保 Git 忽略；Git 索引变化后重新检查是否误跟踪。旧日志来源保留，活动调用不会中途换文件。删除任务默认保留诊断，不自动清理。
+
+已知 SSH 密码、回调 bearer、环境中的密钥/令牌在持久化前脱敏；Claude 原生新密钥确认界面显示的密钥尾部也会遮盖。未知业务秘密和自行编码的内容无法保证自动识别。诊断目录权限 0700，文件权限 0600，分享前仍应按实际业务内容检查。
+
+发现 log.gap 时记录 cursor、source_seq、文件和原因。部分尾行不会被伪造为完整事件；不要为让界面“正常”而删除损坏行。日志开始写入失败会阻止新副作用；清理流程在日志失败时仍尝试停止已拥有的进程。
+
+## 常见失败
+
+| 错误或现象 | 检查方向 |
+|---|---|
+| host_untrusted / host_changed | 核对当前 SSH 指纹和已登记 known_hosts |
+| ssh_unavailable | VPS、SSH、认证前网络及回环转发能力 |
+| forwarding_exposed | sshd 的 GatewayPorts 实际监听地址 |
+| auth / authentication_failed | VPS 的上游地址、密钥、账户权限；不要只看 auth status |
+| schema_result_missing | 模型是否返回 StructuredOutput、hook 是否放行格式化工具 |
+| 交互启动没有任务 | 查看原生初始化界面、MCP 握手和 hooks；不会在未知界面自动输入确认 |
+| stop_unconfirmed | 保留容量，核对两端监督器、进程组和原始执行身份 |
+| log_path_tracked / audit_unavailable | Git 跟踪状态、磁盘空间和目录权限；先保留现场 |
+
+grep 单次超时十秒、每页最多 500 条；目前先收集 rg 输出再分页，超大搜索应按目录或模式缩小范围。图片、文件和输出的单页读取也有上限，继续读取使用返回的游标。

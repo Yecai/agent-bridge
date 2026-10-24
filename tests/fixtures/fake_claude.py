@@ -32,12 +32,57 @@ def main():
             return json.load(response)['result']
 
     rpc('initialize', {'protocolVersion': '2025-11-25', 'capabilities': {}, 'clientInfo': {'name': 'fake', 'version': '1'}})
-    assert 'workspace_context' in [v['name'] for v in rpc('tools/list', {})['tools']]
+    tools={v['name'] for v in rpc('tools/list', {})['tools']}
+    assert 'workspace_context' in tools
     def call(name, arguments):
         result = rpc('tools/call', {'name': name, 'arguments': arguments})
         assert not result.get('isError'), result
         return result['structuredContent']['data']
     context = call('workspace_context', {})
+    if os.environ.get('AGENTBRIDGE_FAKE_HOLD'):
+        call('exec', {'command':[sys.executable,'-c','import time;time.sleep(180)'],'op_id':'held-command'})
+        __import__('time').sleep(180)
+        return
+    if os.environ.get('AGENTBRIDGE_FAKE_ROLES'):
+        call('read_file', {'path':'AGENTS.md'})
+        action=next((name for name in ['dev_handoff','dev_finish'] if name in tools),None)
+        if action:
+            from pathlib import Path
+            directory=Path(args[args.index('--settings')+1]).parent
+            def hook(event):
+                completed=subprocess.run([sys.executable,str(directory/'hooks.py'),str(directory/'hook.json')],
+                    input=json.dumps(event),capture_output=True,text=True,check=True)
+                return json.loads(completed.stdout)
+            if action=='dev_handoff':
+                for name in ['bridge-plan.md','bridge-spec.md']:
+                    call('write_file',{'path':name,'content':'# isolated callback proof\n','create':True,'op_id':name})
+                arguments={'plan':str(Path(context['cwd'])/'bridge-plan.md'),'spec':str(Path(context['cwd'])/'bridge-spec.md')}
+            else:
+                arguments={'summary':'isolated real SSH callback delivery'}
+            session=args[args.index('--session-id')+1]
+            event={'hook_event_name':'PreToolUse','tool_name':'mcp__local__'+action,'tool_use_id':'business-proof',
+                   'session_id':session,'tool_input':arguments}
+            output=hook(event)['hookSpecificOutput']
+            assert output['permissionDecision']=='allow'
+            arguments=output['updatedInput']
+            receipt=call(action,arguments)
+            assert receipt['state']=='accepted'
+            hook({**event,'hook_event_name':'PostToolUse','tool_input':arguments,'tool_response':receipt})
+            __import__('time').sleep(60)  # Only the receipt ACK and supervisor may stop this model.
+            return
+        if 'exec' in tools:
+            call('write_file', {'path':'proof.txt','content':'real-ssh-local-proof','create':True,'op_id':'write-1'})
+            process=call('exec', {'command':['pwd'],'op_id':'cmd-1'})
+            while True:
+                output=call('process_output', {'process_id':process['process_id'],'wait_seconds':1})
+                if output['state']=='exited':break
+            assert context['cwd'] in output['stdout']
+            call('process_stop', {'process_id':process['process_id'],'op_id':'stop-1'})
+        session=args[args.index('--session-id')+1]
+        print(json.dumps({'type':'system','subtype':'init','session_id':session}),flush=True)
+        print(json.dumps({'type':'result','is_error':False,'result':'local-tools-proof','session_id':session,
+                          'structured_output':{'passed':True,'cwd':context['cwd']}}),flush=True)
+        return
     call('write_file', {'path': 'proof.txt', 'content': 'remote-model-local-file', 'create': True, 'op_id': 'write-1'})
     file = call('read_file', {'path': 'proof.txt'})
     call('apply_patch', {'path': 'proof.txt', 'expected_version': file['version'], 'old': 'remote-model', 'new': 'remote-claude', 'op_id': 'patch-1'})

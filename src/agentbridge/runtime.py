@@ -28,6 +28,8 @@ class Runtime:
         self.spec, self.token, self.enabled = spec, secrets.token_urlsafe(32), True
         self.pending_action = None
         self.requested_stop = False
+        self.session_ready = False
+        self.mcp_ready = False
         self.revocation = 0
         self._action_lock = threading.RLock()
         self.secrets = spec.secrets() + [self.token.encode()] + [value.encode() for key, value in os.environ.items()
@@ -61,6 +63,8 @@ class Runtime:
                 self.enabled = True
 
     def hook(self, event):
+        if event.get('hook_event_name') == 'SessionStart' and event.get('session_id') == self.spec.session_id:
+            self.session_ready = True
         if event.get('hook_event_name') != 'PostToolUse':
             return
         with self._action_lock:

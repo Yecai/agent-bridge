@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .errors import BridgeError
 from .procutil import group_alive, start_marker, stop_group
-from .redact import StreamRedactor, redact, redact_bytes
+from .redact import StreamRedactor, environment_secrets, redact, redact_bytes
 from .storage import private_dir, write_json
 from .supervisor import ControlServer, Lease
 
@@ -31,8 +31,7 @@ class RemoteExecution:
         self.readers = []
         self.failure = None
         self.cancel_lock = asyncio.Lock()
-        self.secrets = [value.encode() for key, value in os.environ.items()
-                        if key.startswith(('ANTHROPIC_', 'CLAUDE_CODE_')) and key.endswith(('KEY', 'TOKEN')) and value]
+        self.secrets = environment_secrets(os.environ)
         hook_config = self.root / 'hook.json'
         if hook_config.is_file() and not hook_config.is_symlink():
             token = json.loads(hook_config.read_text()).get('token')
@@ -163,8 +162,7 @@ class RemoteExecution:
                             fingerprint=fingerprint, session_id=frame.get('session_id'))
             self._persist()
             secrets = self.secrets + [s.encode() for s in frame.get('secrets', [])]
-            secrets += [value.encode() for key, value in env.items() if key.startswith(('ANTHROPIC_', 'CLAUDE_CODE_'))
-                        and key.endswith(('KEY', 'TOKEN')) and value]
+            secrets += environment_secrets(env)
             self.secrets = secrets
             for channel, fd in streams:
                 reader = threading.Thread(target=self._reader, args=(channel, fd, secrets), daemon=True)

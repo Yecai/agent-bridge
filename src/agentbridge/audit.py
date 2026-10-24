@@ -43,8 +43,26 @@ class AuditLog:
         except OSError as error:
             raise BridgeError("audit_unavailable", "审计记录无法写入") from error
 
+    @staticmethod
+    def _previous_sequence(path, offset):
+        with path.open('rb') as stream:
+            stream.seek(max(0, offset - 16 * 1024 * 1024))
+            tail = stream.read(min(offset, 16 * 1024 * 1024))
+        for line in reversed(tail.splitlines()):
+            try:
+                value = json.loads(line)
+                if isinstance(value, dict) and type(value.get('source_seq')) is int:
+                    return value['source_seq']
+            except (ValueError, UnicodeDecodeError):
+                continue
+        return 0
+
     def read(self, cursor=0, limit=1000):
+        if type(cursor) is not int or cursor < 0 or type(limit) is not int or limit < 1:
+            raise BridgeError('invalid_cursor', '日志游标或分页大小无效')
         events, gaps = [], []
+        previous = 0
+        previous_location = None
         remaining, position = int(cursor), int(cursor)
         with file_lock(self.root / ".audit.lock"):
             for path in sorted(self.root.glob("trace.[0-9]*.jsonl")) + [self.root / "trace.jsonl"]:
@@ -53,8 +71,12 @@ class AuditLog:
                 size = path.stat().st_size
                 if remaining >= size:
                     remaining -= size
+                    if size:
+                        previous_location = path, size
                     continue
                 with path.open("rb") as stream:
+                    if remaining:
+                        previous_location = path, remaining
                     stream.seek(remaining)
                     remaining = 0
                     for line in stream:
@@ -63,7 +85,17 @@ class AuditLog:
                             break
                         position += len(line)
                         try:
-                            events.append(json.loads(line))
+                            event = json.loads(line)
+                            if not isinstance(event, dict) or type(event.get('source_seq')) is not int:
+                                raise ValueError('invalid sequence')
+                            if previous_location:
+                                previous = self._previous_sequence(*previous_location)
+                                previous_location = None
+                            if event['source_seq'] != previous + 1:
+                                gaps.append({'file': path.name, 'reason': 'sequence_gap',
+                                             'expected': previous + 1, 'actual': event['source_seq']})
+                            previous = event['source_seq']
+                            events.append(event)
                         except (ValueError, UnicodeDecodeError):
                             gaps.append({"file": path.name, "reason": "invalid_event"})
                         if len(events) >= limit:
