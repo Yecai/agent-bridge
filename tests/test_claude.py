@@ -124,3 +124,26 @@ def test_argv_always_skips_permission_prompts(spec):
 def test_settings_skip_bypass_confirmation_dialog():
     from agentbridge.hooks import settings
     assert settings('hook-cmd')['skipDangerousModePermissionPrompt'] is True
+
+
+BYPASS_SCREEN = ('WARNING: Claude Code running in Bypass Permissions mode\r\n'
+                 'By proceeding, you accept all responsibility\r\n'
+                 '\xe2\x9d\xaf 1. No, exit\r\n  2. Yes, I accept').encode('latin-1')
+
+
+async def test_interactive_startup_accepts_bypass_dialog_once(spec):
+    import base64
+    from agentbridge.runner import Runner
+    spec.mode = 'interactive'; spec.prompt = 'initial prompt'
+    runner = Runner(spec); runner.runtime.mcp_ready = True
+    inputs = []
+    async def remote(action, **fields):
+        inputs.append(base64.b64decode(fields['data']))
+    runner.remote = remote
+    await runner._interactive_startup(b'Claude Code v2.1.310\r\n' + BYPASS_SCREEN)
+    assert inputs == [b'\x1b[B\r']
+    await runner._interactive_startup(BYPASS_SCREEN)
+    assert inputs == [b'\x1b[B\r']
+    await runner._interactive_startup(b'Claude Code v2.1.310\r\n\xe2\x9d\xaf Try a prompt')
+    assert inputs[-2].endswith(b'initial prompt\x1b[201~')
+    assert inputs[-1] == b'\r'

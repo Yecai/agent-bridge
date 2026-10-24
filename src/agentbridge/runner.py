@@ -51,6 +51,7 @@ class Runner:
         self.remote_cwd = None
         self.startup_output = bytearray()
         self.workspace_trusted = False
+        self.bypass_accepted = False
         self.initial_prompt_sent = False
 
     async def _interactive_startup(self, data):
@@ -60,7 +61,17 @@ class Runner:
         del self.startup_output[:-16384]
         text = re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[78])', '', self.startup_output.decode(errors='replace'))
         compact = ''.join(text.split())
-        ready_screen = self.runtime.mcp_ready and 'ClaudeCodev' in compact and '❯' in compact and 'Accessingworkspace:' not in compact
+        bypass_dialog = 'BypassPermissionsmode' in compact and 'No,exit' in compact and 'Yes,Iaccept' in compact
+        ready_screen = (self.runtime.mcp_ready and 'ClaudeCodev' in compact and '❯' in compact
+                        and 'Accessingworkspace:' not in compact and 'BypassPermissionsmode' not in compact)
+        if bypass_dialog:
+            # Fallback when skipDangerousModePermissionPrompt is ignored: move to "Yes, I accept" once.
+            self.startup_output.clear()
+            if not self.bypass_accepted:
+                self.bypass_accepted = True
+                self.runtime.audit.append('claude.bypass_accept', 'ok', {'cwd': self.remote_cwd})
+                await self.remote('input', data=base64.b64encode(b'\x1b[B\r').decode())
+            return
         if self.runtime.session_ready or ready_screen:
             self.startup_output.clear()
             if self.spec.prompt and not self.initial_prompt_sent:
