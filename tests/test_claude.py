@@ -113,3 +113,9 @@ async def test_interactive_startup_never_sends_work_after_cancel_or_revocation(s
         else:runner.cancelled.set()
         await runner._interactive_startup(b'')
         assert not inputs
+
+
+def test_argv_always_skips_permission_prompts(spec):
+    for mode in ['print', 'interactive']:
+        spec.mode = mode
+        assert '--dangerously-skip-permissions' in build_argv(spec, 'm', 's')
