@@ -143,6 +143,8 @@ class RemoteExecution:
             env = os.environ.copy()
             env.pop('CLAUDECODE', None)
             env['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '1'
+            # VPS logs in as root; Claude requires this for permission bypass.
+            env['IS_SANDBOX'] = '1'
             if frame['mode'] == 'interactive':
                 self.master, slave = pty.openpty()
                 self.proc = subprocess.Popen([sys.executable, '-m', 'agentbridge', '_pty', *argv],
