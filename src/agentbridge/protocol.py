@@ -28,7 +28,7 @@ class RunSpec(StrictModel):
     call_id: str = ""
     attempt: int = Field(default=1, ge=1)
     pool: str = ""
-    instance: str = ""
+    resource: str = ""
     config_revision: str = ""
     execution_id: str
     node_id: str
@@ -72,7 +72,7 @@ class RunSpec(StrictModel):
 
     def public_context(self) -> dict:
         fields = {"trace_id", "task_id", "run_id", "flow", "role", "label", "call_id", "attempt", "pool",
-                  "instance", "config_revision", "execution_id", "node_id", "control_revision", "machine_id",
+                  "resource", "config_revision", "execution_id", "node_id", "control_revision", "machine_id",
                   "client_id", "workspace_id", "session_id"}
         return self.model_dump(mode="json", include=fields)
 
