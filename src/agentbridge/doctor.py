@@ -79,7 +79,12 @@ async def doctor(spec):
             probe = json.loads(stdout)
             result['checks']['python'] = {'status': 'ok' if tuple(probe['python']) >= (3, 11) else 'failed', 'version': probe['python']}
             auth = probe.get('auth', {})
-            result['checks']['claude_auth'] = {'status': 'ok' if auth.get('code') == 0 else 'failed'}
+            try:
+                configured = auth.get('code') == 0 and json.loads(auth.get('stdout', '{}')).get('loggedIn') is True
+            except ValueError:
+                configured = False
+            result['checks']['claude_auth'] = {'status': 'untested' if configured else 'failed', 'configured': configured,
+                                              'detail': '配置存在不代表模型认证通过；需真实模型调用验证'}
             help_text = probe.get('help', {}).get('stdout', '')
             required = ('--tools', '--strict-mcp-config', '--settings', '--setting-sources', '--disable-slash-commands', '--json-schema', '--session-id', '--resume')
             result['claude'] = {'version': probe.get('version', {}).get('stdout', '').strip(),

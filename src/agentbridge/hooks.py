@@ -2,11 +2,17 @@
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 from uuid import UUID, uuid5
 
 MUTATIONS = {'write_file', 'apply_patch', 'exec', 'process_stop', 'dev_handoff', 'dev_finish'}
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 def operation_id(execution_id, tool_use_id):
@@ -41,7 +47,18 @@ def main():
     request = Request(config['url'], data=json.dumps(event).encode(), method='POST',
                       headers={'Authorization': 'Bearer ' + config['token'], 'Content-Type': 'application/json'})
     try:
-        with urlopen(request, timeout=8) as response:
+        if event.get('session_id') == config.get('session_id') and event.get('transcript_path') and config.get('session_hint'):
+            destination = Path(config['session_hint'])
+            fd, temporary = tempfile.mkstemp(dir=destination.parent, prefix='.session-')
+            try:
+                with os.fdopen(fd, 'w') as stream:
+                    json.dump({'session_id': event['session_id'], 'transcript_path': event['transcript_path']}, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, destination)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=8) as response:
             if response.status != 200:
                 raise OSError('hook audit rejected')
         print(json.dumps(decide(event, config['execution_id'])))

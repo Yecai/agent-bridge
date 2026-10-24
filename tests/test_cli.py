@@ -22,3 +22,16 @@ def test_request_must_be_private(spec, tmp_path):
     result = subprocess.run([sys.executable, '-m', 'agentbridge', 'run', '--request-file', str(request)], capture_output=True, text=True)
     assert result.returncode != 0
     assert json.loads(result.stderr)['error_code'] == 'request_not_private'
+
+
+def test_local_execution_request_identity_is_immutable(spec,tmp_path,monkeypatch):
+    import asyncio
+    import pytest
+    from agentbridge.cli import ensure_request_identity
+    from agentbridge.errors import BridgeError
+    from agentbridge import state
+    monkeypatch.setenv('AGENTBRIDGE_STATE',str(tmp_path/'state'))
+    ensure_request_identity(spec)
+    ensure_request_identity(spec)
+    with pytest.raises(BridgeError,match='execution_conflict'):
+        ensure_request_identity(spec.model_copy(update={'prompt':'changed'}))

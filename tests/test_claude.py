@@ -38,3 +38,12 @@ def test_json_lines_retains_partial_and_reports_invalid():
     assert lines.feed(b'ype":"result"}\nbad\n') == [{'type': 'result'}, {'type': 'bridge.invalid_event', 'raw': 'bad'}]
     assert lines.feed(b'tail') == []
     assert lines.finish() == [{'type': 'bridge.partial_event', 'raw': 'tail'}]
+
+
+def test_remote_workspace_is_stable_across_execution_ids(spec):
+    from agentbridge.runner import remote_workspace
+    first=remote_workspace('/remote/home',spec)
+    spec.execution_id=str(uuid4())
+    assert remote_workspace('/remote/home',spec)==first
+    spec.client_id='different-client'
+    assert remote_workspace('/remote/home',spec)!=first

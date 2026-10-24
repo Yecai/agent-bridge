@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import fcntl
+import hashlib
 import json
 import os
 import pty
@@ -14,7 +15,7 @@ from pathlib import Path
 
 from .errors import BridgeError
 from .procutil import group_alive, start_marker, stop_group
-from .redact import StreamRedactor
+from .redact import StreamRedactor, redact, redact_bytes
 from .storage import private_dir, write_json
 from .supervisor import ControlServer, Lease
 
@@ -30,6 +31,55 @@ class RemoteExecution:
         self.readers = []
         self.failure = None
         self.cancel_lock = asyncio.Lock()
+        self.secrets = []
+        self.transcript_gap = None
+
+    def _capture_transcript(self):
+        hint = self.root / 'session.json'
+        if not hint.is_file():
+            return
+        metadata = json.loads(hint.read_text())
+        if metadata.get('session_id') != self.row.get('session_id'):
+            self.transcript_gap = 'session_mismatch'
+            return
+        source = Path(metadata.get('transcript_path', ''))
+        allowed = Path(os.environ.get('CLAUDE_CONFIG_DIR', str(Path.home() / '.claude'))) / 'projects'
+        try:
+            source = source.resolve(strict=True)
+            source.relative_to(allowed.resolve())
+            if source.name != metadata['session_id'] + '.jsonl':
+                raise ValueError('session filename')
+        except (ValueError, OSError):
+            self.transcript_gap = 'path_rejected'
+            return
+        cursor_path = self.root / 'transcript-cursor.json'
+        cursor = json.loads(cursor_path.read_text()) if cursor_path.exists() else {'offset': 0, 'path': str(source)}
+        if cursor['path'] != str(source) or source.stat().st_size < cursor['offset']:
+            self.transcript_gap = 'source_changed'
+            return
+        self.transcript_gap = None
+        output = os.open(self.root / 'transcript.bin', os.O_APPEND | os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        with source.open('rb') as stream, os.fdopen(output, 'ab') as target:
+            stream.seek(cursor['offset'])
+            for _ in range(500):
+                offset = stream.tell()
+                line = stream.readline()
+                if not line:
+                    break
+                if not line.endswith(b'\n') and self.row['state'] != 'exited':
+                    self.transcript_gap = 'partial_line'
+                    break
+                try:
+                    data = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    data = {'type': 'bridge.invalid_transcript',
+                            'base64': base64.b64encode(redact_bytes(line, self.secrets)).decode()}
+                event = redact({'offset': offset, 'session_id': metadata['session_id'], 'data': data}, self.secrets)
+                target.write(json.dumps(event, ensure_ascii=False).encode() + b'\n')
+                target.flush()
+                os.fsync(target.fileno())
+                cursor['offset'] = stream.tell()
+                write_json(cursor_path, cursor)
 
     def _persist(self):
         write_json(self.root / 'status.json', self.row)
@@ -73,7 +123,11 @@ class RemoteExecution:
     async def handle(self, frame):
         action = frame['action']
         if action == 'start':
+            fingerprint = hashlib.sha256(json.dumps({key: frame.get(key) for key in
+                ('argv', 'cwd', 'mode', 'prompt', 'session_id')}, sort_keys=True).encode()).hexdigest()
             if self.proc is not None:
+                if self.row.get('fingerprint') != fingerprint:
+                    raise BridgeError('execution_conflict', '同一执行身份的启动参数发生变化')
                 return dict(self.row)
             if (self.root / 'status.json').exists():
                 raise BridgeError('outcome_unknown', '发现旧执行记录，拒绝重复启动')
@@ -82,6 +136,7 @@ class RemoteExecution:
                 raise BridgeError('invalid_command', '远端启动参数无效')
             env = os.environ.copy()
             env.pop('CLAUDECODE', None)
+            env['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '1'
             if frame['mode'] == 'interactive':
                 self.master, slave = pty.openpty()
                 self.proc = subprocess.Popen([sys.executable, '-m', 'agentbridge', '_pty', *argv],
@@ -97,9 +152,13 @@ class RemoteExecution:
                 self.proc.stderr.close()
                 self.proc.stdin.write(frame.get('prompt', '').encode())
                 self.proc.stdin.close()
-            self.row.update(state='running', pid=self.proc.pid, start_marker=start_marker(self.proc.pid), stop_confirmed=False)
+            self.row.update(state='running', pid=self.proc.pid, start_marker=start_marker(self.proc.pid), stop_confirmed=False,
+                            fingerprint=fingerprint, session_id=frame.get('session_id'))
             self._persist()
             secrets = [s.encode() for s in frame.get('secrets', [])]
+            secrets += [value.encode() for key, value in env.items() if key.startswith(('ANTHROPIC_', 'CLAUDE_CODE_'))
+                        and key.endswith(('KEY', 'TOKEN')) and value]
+            self.secrets = secrets
             for channel, fd in streams:
                 reader = threading.Thread(target=self._reader, args=(channel, fd, secrets), daemon=True)
                 self.readers.append(reader)
@@ -118,9 +177,10 @@ class RemoteExecution:
                     await asyncio.wait_for(asyncio.shield(self.monitor), 15)
                 return dict(self.row)
         if action == 'events':
+            self._capture_transcript()
             offsets = frame.get('cursor') or {'stdout': 0, 'stderr': 0}
-            result = {'next_cursor': {}, **self.row}
-            for channel in ('stdout', 'stderr'):
+            result = {'next_cursor': {}, **self.row, 'transcript_gap': self.transcript_gap}
+            for channel in ('stdout', 'stderr', 'transcript'):
                 path = self.root / (channel + '.bin')
                 offset = offsets.get(channel, 0)
                 with path.open('rb') if path.exists() else open(os.devnull, 'rb') as stream:
@@ -141,8 +201,8 @@ class RemoteExecution:
         raise BridgeError('invalid_action', '未知监督动作')
 
 
-async def serve_remote(root, execution_id, revision, socket_path, initial=None):
-    remote = RemoteExecution(root, execution_id, revision)
+async def serve_remote(root, execution_id, revision, socket_path, initial=None, ttl=60):
+    remote = RemoteExecution(root, execution_id, revision, ttl=ttl)
     async with ControlServer(socket_path, execution_id, revision, remote.handle):
         try:
             if initial:

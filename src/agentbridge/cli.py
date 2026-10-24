@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import signal
@@ -36,6 +37,19 @@ def private_request(spec):
     return json.dumps(result, ensure_ascii=False)
 
 
+def ensure_request_identity(spec):
+    from . import state
+    from .storage import file_lock, atomic_write
+    root = state.execution(spec.execution_id)
+    fingerprint = hashlib.sha256(json.dumps(json.loads(private_request(spec)), sort_keys=True).encode()).hexdigest()
+    with file_lock(root / '.request.lock'):
+        path = root / 'request-fingerprint'
+        if path.exists() and path.read_text() != fingerprint:
+            raise BridgeError('execution_conflict', '同一执行身份不能更改运行配置')
+        if not path.exists():
+            atomic_write(path, fingerprint.encode())
+
+
 def saved_status(execution_id):
     from . import state
     path = state.execution(execution_id) / 'status.json'
@@ -48,6 +62,16 @@ async def command(execution_id, action, **fields):
     from . import state
     from .supervisor import control
     saved = saved_status(execution_id)
+    if saved.get('stop_confirmed'):
+        if action in {'status', 'cancel', 'renew'}:
+            return saved
+        if action == 'events':
+            from .audit import AuditLog
+            return AuditLog(Path(saved['log_dir']), {}).read(cursor=fields.get('cursor', 0), limit=200)
+        if action == 'terminal':
+            from .artifacts import Artifacts
+            output = Artifacts(Path(saved['log_dir']) / 'artifacts').output('remote:stdout', fields.get('cursor', 0))
+            return {'data': base64.b64encode(output['data']).decode(), 'next_cursor': output['next_cursor']}
     try:
         return await control(state.address(execution_id), execution_id, saved['revision'], {'action': action, **fields})
     except (OSError, TimeoutError):
@@ -59,6 +83,7 @@ async def command(execution_id, action, **fields):
 async def run_cli(spec):
     from . import state
     root = state.execution(spec.execution_id)
+    ensure_request_identity(spec)
     if not (root / 'status.json').exists():
         from .storage import file_lock
         with file_lock(root / '.start.lock'):
@@ -134,6 +159,13 @@ async def run_cli(spec):
 
 def main():
     # Remote actions remain stdlib-only; local dependencies are loaded lazily.
+    if len(sys.argv) > 3 and sys.argv[1] == '_process':
+        fd = int(sys.argv[2])
+        permitted = os.read(fd, 1) == b'1'
+        os.close(fd)
+        if permitted:
+            os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
+        sys.exit(1)
     if len(sys.argv) > 2 and sys.argv[1] == '_pty':
         import fcntl
         import termios
@@ -155,6 +187,10 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     for name in ('run', 'doctor'):
         sub.add_parser(name).add_argument('--request-file', required=True)
+    item = sub.add_parser('trust-host')
+    item.add_argument('--request-file', required=True)
+    item.add_argument('--challenge', required=True)
+    item.add_argument('--fingerprint', required=True)
     for name in ('status', 'cancel', 'logs', 'export'):
         item = sub.add_parser(name)
         item.add_argument('--execution', required=True)
@@ -170,12 +206,13 @@ def main():
             from .local import daemon
             asyncio.run(daemon(RunSpec.model_validate_json(sys.stdin.buffer.read())))
             return
-        if args.command in {'run', 'doctor'}:
+        if args.command in {'run', 'doctor', 'trust-host'}:
             spec = load_request(args.request_file)
             if args.command == 'run':
                 sys.exit(asyncio.run(run_cli(spec)))
-            from .doctor import doctor
-            print(json.dumps(asyncio.run(doctor(spec)), ensure_ascii=False))
+            from .doctor import doctor, trust
+            result = trust(spec.target, args.challenge, args.fingerprint) if args.command == 'trust-host' else doctor(spec)
+            print(json.dumps(asyncio.run(result), ensure_ascii=False))
         elif args.command in {'status', 'cancel'}:
             print(json.dumps(asyncio.run(command(args.execution, args.command)), ensure_ascii=False))
         else:

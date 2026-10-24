@@ -78,3 +78,70 @@ def test_audit_failure_revokes_runtime(spec, monkeypatch):
                      ToolMeta(execution_id=spec.execution_id, tool_call_id='t', op_id='o', control_revision=0))
     assert not runtime.enabled
     assert not (spec.cwd / 'a').exists()
+
+
+def test_output_storage_failure_revokes_and_stops_command(spec, monkeypatch):
+    import sys,time
+    from agentbridge.runtime import Runtime
+    runtime=Runtime(spec)
+    def fail(*args,**kwargs):
+        raise OSError('fixture disk full')
+    monkeypatch.setattr(runtime.artifacts,'append',fail)
+    row=runtime.processes.start([sys.executable,'-c','import time; print("output",flush=True); time.sleep(30)'],str(spec.cwd),'disk-full')
+    try:
+        deadline=time.monotonic()+3
+        while (runtime.enabled or runtime.processes.rows[row['process_id']]['process'].poll() is None) and time.monotonic()<deadline:
+            time.sleep(.02)
+        assert not runtime.enabled
+        assert runtime.processes.rows[row['process_id']]['process'].poll() is not None
+    finally:
+        runtime.processes.stop_all()
+
+
+def test_stop_still_kills_owned_group_when_audit_is_unavailable(spec,monkeypatch):
+    import sys
+    from agentbridge.runtime import Runtime
+    from agentbridge.procutil import stop_group
+    runtime=Runtime(spec)
+    row=runtime.processes.start([sys.executable,'-c','import time;time.sleep(30)'],str(spec.cwd),'stop-disk-full')
+    item=runtime.processes.rows[row['process_id']]
+    def unavailable(*args,**kwargs):
+        raise OSError('fixture disk full')
+    monkeypatch.setattr(runtime.audit,'append',unavailable)
+    try:
+        try:
+            runtime.processes.stop_all()
+        except Exception:
+            pass
+        assert item['process'].poll() is not None
+        assert not runtime.enabled
+    finally:
+        stop_group(item['process'],item['row']['start_marker'])
+
+
+def test_host_action_freezes_mutations_until_controlled_ack(spec, monkeypatch):
+    from agentbridge import callbacks
+    from agentbridge.runtime import Runtime
+    from agentbridge.protocol import ToolMeta
+    from agentbridge.errors import BridgeError
+    spec.callbacks={'dev_finish':'http://127.0.0.1:8787/internal/agentbridge/actions/dev_finish'}
+    runtime=Runtime(spec)
+    meta=ToolMeta(execution_id=spec.execution_id,tool_call_id='finish',op_id='finish-op',control_revision=0)
+    acked=[]
+    monkeypatch.setattr(callbacks,'invoke',lambda *args: {'receipt':'receipt-1','state':'accepted'})
+    monkeypatch.setattr(callbacks,'ack',lambda *args: acked.append(args) or {'state':'acked'})
+    result=runtime.call('dev_finish',{'summary':'done'},meta)
+    assert result['data']['state']=='accepted'
+    assert not runtime.requested_stop
+    with pytest.raises(BridgeError,match='action_pending'):
+        runtime.call('exec',{'command':'touch forbidden'},meta.model_copy(update={'op_id':'another'}))
+    assert not (spec.cwd/'forbidden').exists()
+    runtime.hook({'hook_event_name':'PreToolUse','tool_name':'mcp__local__dev_finish','tool_input':{'op_id':'finish-op'}})
+    assert not acked
+    runtime.hook({'hook_event_name':'PostToolUse','tool_name':'mcp__local__dev_finish','tool_input':{'op_id':'wrong'}})
+    assert not acked
+    runtime.hook({'hook_event_name':'PostToolUse','tool_name':'mcp__local__dev_finish','tool_input':{'op_id':'finish-op'}})
+    assert len(acked)==1
+    assert runtime.requested_stop
+    runtime.hook({'hook_event_name':'PostToolUse','tool_name':'mcp__local__dev_finish','tool_input':{'op_id':'finish-op'}})
+    assert len(acked)==1

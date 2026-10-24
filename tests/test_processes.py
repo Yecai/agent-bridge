@@ -67,3 +67,26 @@ def test_exited_leader_does_not_leave_child(manager, spec):
         assert not group_alive(row['pid'])
     finally:
         manager.stop_all()
+
+
+def test_registration_failure_never_releases_command_gate(manager,spec,monkeypatch):
+    import agentbridge.processes as processes
+    from agentbridge.procutil import group_alive
+    pid=[]
+    original=processes.subprocess.Popen
+    def launch(*args,**kwargs):
+        proc=original(*args,**kwargs);pid.append(proc.pid);return proc
+    monkeypatch.setattr(processes.subprocess,'Popen',launch)
+    def unavailable(*args,**kwargs):
+        raise OSError('fixture journal full')
+    monkeypatch.setattr(manager.runtime.journal,'bind_process',unavailable)
+    try:
+        with pytest.raises(Exception):
+            manager.start([sys.executable,'-c','from pathlib import Path;Path("must-not-exist").write_text("bad")'],spec.cwd,'registration-failure')
+        assert not (spec.cwd/'must-not-exist').exists()
+        assert pid and not group_alive(pid[0])
+    finally:
+        for item in manager.rows.values():
+            from agentbridge.procutil import stop_group
+            stop_group(item['process'],item['row']['start_marker'])
+            item['done']=True

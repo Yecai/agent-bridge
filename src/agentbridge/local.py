@@ -25,7 +25,12 @@ async def daemon(spec):
         row.update(values)
         write_json(status_path, row)
 
-    runner = Runner(spec, updated)
+    try:
+        runner = Runner(spec, updated)
+    except Exception as error:
+        updated({'state': 'exited', 'exit_code': 1, 'stop_confirmed': True,
+                 'error_code': error.code if isinstance(error, BridgeError) else 'initialization_failed'})
+        return
 
     async def handle(frame):
         action = frame['action']

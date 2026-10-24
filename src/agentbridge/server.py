@@ -140,6 +140,7 @@ class AuthGate:
                                           {'hook': event.get('hook_event_name'), 'tool': event.get('tool_name')},
                                           tool_call_id=event.get('tool_use_id'), artifact_refs=refs,
                                           session_id=event.get('session_id'))
+                await asyncio.to_thread(self.runtime.hook, event)
                 status, content = 200, b'{}'
             except Exception:
                 self.runtime.revoke()

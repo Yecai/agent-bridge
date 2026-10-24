@@ -1,6 +1,7 @@
 import hashlib
 import json
 import secrets
+import threading
 import time
 from uuid import uuid4
 
@@ -22,6 +23,9 @@ HOST_TOOLS = frozenset({"dev_handoff", "dev_finish"})
 class Runtime:
     def __init__(self, spec):
         self.spec, self.token, self.enabled = spec, secrets.token_urlsafe(32), True
+        self.pending_action = None
+        self.requested_stop = False
+        self._action_lock = threading.RLock()
         self.secrets = spec.secrets() + [self.token.encode()]
         self.audit = AuditLog(spec.log_dir, spec.public_context(), self.secrets)
         self.artifacts = Artifacts(spec.log_dir / "artifacts", self.secrets)
@@ -38,6 +42,21 @@ class Runtime:
     def revoke(self):
         self.enabled = False
 
+    def hook(self, event):
+        if event.get('hook_event_name') != 'PostToolUse':
+            return
+        with self._action_lock:
+            pending = self.pending_action
+            if not pending or pending.get('acked'):
+                return
+            if (event.get('tool_name') != 'mcp__local__' + pending['name']
+                    or (event.get('tool_input') or {}).get('op_id') != pending['op_id']):
+                return
+            callbacks.ack(self.spec, pending['name'], pending['op_id'], pending['receipt'])
+            self.audit.append('action.acked', 'ok', {'receipt': pending['receipt']}, op_id=pending['op_id'])
+            pending['acked'] = True
+            self.requested_stop = True
+
     def call(self, name, arguments, meta):
         started = time.monotonic()
         try:
@@ -47,6 +66,10 @@ class Runtime:
                 raise BridgeError("control_lost", "执行归属已失效")
             if name not in self.allowed_tools:
                 raise BridgeError("tool_not_allowed", "工具不在本次授权范围")
+            if self.pending_action and name in WRITE_TOOLS | HOST_TOOLS and not (
+                    name == self.pending_action['name'] and meta.op_id == self.pending_action['op_id']):
+                if name not in {'process_output', 'process_stop'}:
+                    raise BridgeError('action_pending', '业务回执已接收，等待停止确认，禁止新增写操作')
             mutation = name in {"write_file", "apply_patch", "process_stop"} | HOST_TOOLS
             if mutation or name == "exec":
                 if not meta.op_id:
@@ -71,7 +94,11 @@ class Runtime:
             elif name == "process_stop":
                 data = self.processes.stop(**arguments)
             else:
-                data = callbacks.invoke(self.spec, name, arguments, meta)
+                with self._action_lock:
+                    data = callbacks.invoke(self.spec, name, arguments, meta)
+                    if data.get('state') != 'accepted' or not isinstance(data.get('receipt'), str):
+                        raise BridgeError('callback_invalid', '宿主未返回有效接收回执')
+                    self.pending_action = {'name': name, 'op_id': meta.op_id, 'receipt': data['receipt'], 'acked': False}
             refs = self.artifacts.put(json.dumps(data, ensure_ascii=False).encode())
             result = {"status": "running" if data.get("state") == "running" else "ok", "data": data, "artifact_refs": refs}
             if mutation:

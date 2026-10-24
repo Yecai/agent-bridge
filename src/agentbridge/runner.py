@@ -20,6 +20,11 @@ from .ssh import connect_target, reverse_mcp
 from .storage import write_json
 
 
+def remote_workspace(home, spec):
+    identity = hashlib.sha256(json.dumps([spec.client_id, spec.workspace_id]).encode()).hexdigest()
+    return home + '/.local/share/agentbridge/workspaces/' + identity
+
+
 class Runner:
     def __init__(self, spec, on_status=None):
         self.spec = spec
@@ -31,8 +36,11 @@ class Runner:
         self.on_status = on_status or (lambda row: None)
         self.result, self.remote_status = None, None
         self.remote_start_requested = False
-        self.remote_cursor = {'stdout': 0, 'stderr': 0}
+        self.remote_cursor = {'stdout': 0, 'stderr': 0, 'transcript': 0}
         self.parser = JsonLines()
+        self.transcript_parser = JsonLines()
+        self.transcript_offset = -1
+        self.transcript_gap = None
 
     async def remote(self, action, **fields):
         frame = {'action': action, 'execution_id': self.spec.execution_id,
@@ -53,14 +61,18 @@ class Runner:
         async with self.connection.start_sftp_client() as sftp:
             home = await sftp.realpath('.')
             root = home + '/.local/share/agentbridge/executions/' + spec.execution_id
+            workspace = remote_workspace(home, spec)
             await sftp.makedirs(root, exist_ok=True)
             await sftp.chmod(root, 0o700)
+            await sftp.makedirs(workspace, exist_ok=True)
+            await sftp.chmod(workspace, 0o700)
             hook_script = str(Path(hooks.__file__).resolve())
             files = {
                 'mcp.json': json.dumps({'mcpServers': {'local': {'type': 'http', 'url': f'http://127.0.0.1:{self.remote_port}/mcp',
                                                                 'headers': {'Authorization': 'Bearer ' + self.runtime.token}}}}),
                 'hook.json': json.dumps({'url': f'http://127.0.0.1:{self.remote_port}/hooks', 'token': self.runtime.token,
-                                         'execution_id': spec.execution_id}),
+                                         'execution_id': spec.execution_id, 'session_id': spec.session_id,
+                                         'session_hint': root + '/session.json'}),
                 'hooks.py': Path(hook_script).read_text(),
                 'prompt.txt': context_prompt(spec),
             }
@@ -70,7 +82,7 @@ class Runner:
                 async with sftp.open(root + '/' + name, 'w') as stream:
                     await stream.write(content)
                 await sftp.chmod(root + '/' + name, 0o600)
-        return root
+        return root, workspace
 
     def event(self, event):
         event_type = event.get('type', 'unknown')
@@ -82,7 +94,7 @@ class Runner:
 
     async def collect(self):
         row = await self.remote('events', cursor=self.remote_cursor)
-        for channel in ('stdout', 'stderr'):
+        for channel in ('stdout', 'stderr', 'transcript'):
             data = base64.b64decode(row[channel])
             if data:
                 refs = self.runtime.artifacts.append('remote:' + channel, data)
@@ -90,6 +102,17 @@ class Runner:
                 if channel == 'stdout' and self.spec.mode == 'print':
                     for event in self.parser.feed(data):
                         self.event(event)
+                elif channel == 'transcript':
+                    for event in self.transcript_parser.feed(data):
+                        offset = event.get('offset')
+                        if isinstance(offset, int) and offset > self.transcript_offset:
+                            self.runtime.audit.append('claude.transcript', 'received', data=event.get('data'),
+                                                      session_id=event.get('session_id'), details={'source_offset': offset})
+                            self.transcript_offset = offset
+        if row.get('transcript_gap') != self.transcript_gap:
+            self.transcript_gap = row.get('transcript_gap')
+            if self.transcript_gap:
+                self.runtime.audit.append('claude.transcript_gap', 'error', {'reason': self.transcript_gap})
         self.remote_cursor = row['next_cursor']
         self.remote_status = row
         return row
@@ -107,10 +130,11 @@ class Runner:
                     deployment = await deploy(connection, runtime)
                     self.remote_python = deployment['python']
                     runtime.audit.append('remote.deployed', 'ok', {'wheel_sha256': deployment['sha256']})
-                    remote_root = await self._configure(deployment)
+                    remote_root, remote_cwd = await self._configure(deployment)
                     self.remote_start_requested = True
                     row = await self.remote('start', argv=build_argv(spec, remote_root + '/mcp.json', remote_root + '/settings.json'),
-                                            cwd=remote_root, mode=spec.mode, prompt=context_prompt(spec), secrets=[runtime.token])
+                                            cwd=remote_cwd, mode=spec.mode, prompt=context_prompt(spec), secrets=[runtime.token],
+                                            session_id=spec.session_id)
                     self.remote_status = row
                     runtime.audit.append('claude.started', 'running', {'remote_pid': row.get('pid'), 'mode': spec.mode}, session_id=spec.session_id)
                     self.on_status({'state': 'running', 'session_id': spec.session_id, 'stop_confirmed': False})
@@ -118,11 +142,11 @@ class Runner:
                         await self.remote('input', data=base64.b64encode((context_prompt(spec) + '\r').encode()).decode())
                     renewal = time.monotonic()
                     try:
-                        while not self.cancelled.is_set():
+                        while not self.cancelled.is_set() and not runtime.requested_stop:
                             row = await self.collect()
                             if row['state'] != 'running':
                                 # Drain beyond a single page before publishing completion.
-                                if not row['stdout'] and not row['stderr']:
+                                if not row['stdout'] and not row['stderr'] and not row.get('transcript'):
                                     break
                                 continue
                             if not runtime.enabled:
@@ -142,8 +166,8 @@ class Runner:
                         await tunnel.wait_closed()
                     if not remote_stopped:
                         raise BridgeError('stop_unconfirmed', '远端停止未确认')
-                    code = 0 if not self.cancelled.is_set() and row.get('exit_code') == 0 else 1
-                    if spec.mode == 'print' and not self.result:
+                    code = 0 if runtime.requested_stop or (not self.cancelled.is_set() and row.get('exit_code') == 0) else 1
+                    if spec.mode == 'print' and not self.result and not runtime.requested_stop:
                         raise BridgeError('result_missing', 'Claude 未返回最终结构化事件')
                     if self.result and self.result.get('is_error'):
                         code = 1
@@ -160,7 +184,7 @@ class Runner:
                 local_stopped = True
             except Exception:
                 error_code = 'stop_unconfirmed'
-            for channel in ('stdout', 'stderr'):
+            for channel in ('stdout', 'stderr', 'transcript'):
                 runtime.artifacts.finish('remote:' + channel)
             for event in self.parser.finish():
                 self.event(event)

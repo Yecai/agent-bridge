@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from uuid import uuid4
@@ -19,6 +20,12 @@ class ProcessManager:
         self.root = private_dir(runtime.spec.log_dir / "processes")
         self.rows = {}
         self.condition = threading.Condition(threading.RLock())
+
+    def _revoke(self):
+        if hasattr(self.runtime, 'revoke'):
+            self.runtime.revoke()
+        else:
+            self.runtime.enabled = False
 
     def start(self, command, cwd, op_id, timeout=1800):
         if self.runtime.spec.access != "full":
@@ -42,21 +49,43 @@ class ProcessManager:
             process_id = str(uuid4())
             self.runtime.audit.append("process.begin", "running", {"command": command, "cwd": str(cwd)}, op_id=op_id, process_id=process_id)
             env = os.environ.copy()
+            env['AGENTBRIDGE_EXECUTION_ID'] = spec.execution_id
             for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "CLAUDECODE"):
                 env.pop(key, None)
             if os.environ.get("VIRTUAL_ENV"):
                 own_bin = os.path.join(os.environ["VIRTUAL_ENV"], "bin")
                 env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep) if p != own_bin)
-            process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-            row = {"process_id": process_id, "execution_id": spec.execution_id, "pid": process.pid,
-                   "state": "running", "exit_code": None, "op_id": op_id, "start_marker": start_marker(process.pid)}
-            self.rows[process_id] = {"row": row, "process": process, "done": False}
-            write_json(self.root / f"{process_id}.json", row)
-            self.runtime.journal.bind_process(spec.execution_id, op_id, process_id)
-            self.runtime.journal.finish(spec.execution_id, op_id, {"status": "running", "data": dict(row)})
-            threading.Thread(target=self._monitor, args=(process_id, max(1, min(timeout, 86400))), daemon=True).start()
-            return dict(row)
+            read_fd, write_fd = os.pipe()
+            process = None
+            marker = None
+            try:
+                process = subprocess.Popen([sys.executable, '-m', 'agentbridge', '_process', str(read_fd), *argv],
+                                           pass_fds=(read_fd,), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                marker = start_marker(process.pid)
+                row = {"process_id": process_id, "execution_id": spec.execution_id, "pid": process.pid,
+                       "state": "running", "exit_code": None, "op_id": op_id, "start_marker": marker}
+                write_json(self.root / f"{process_id}.json", row)
+                self.runtime.journal.bind_process(spec.execution_id, op_id, process_id)
+                self.runtime.journal.finish(spec.execution_id, op_id, {"status": "running", "data": dict(row)})
+                self.rows[process_id] = {"row": row, "process": process, "done": False}
+                os.write(write_fd, b'1')
+                threading.Thread(target=self._monitor, args=(process_id, max(1, min(timeout, 86400))), daemon=True).start()
+                return dict(row)
+            except BaseException:
+                self._revoke()
+                if process is not None:
+                    if marker:
+                        stop_group(process, marker)
+                    else:
+                        process.kill()
+                        process.wait()
+                    process.stdout.close()
+                    process.stderr.close()
+                raise
+            finally:
+                os.close(read_fd)
+                os.close(write_fd)
 
     def _reader(self, process_id, channel, stream):
         stream_id = f"{process_id}:{channel}"
@@ -68,6 +97,19 @@ class ProcessManager:
                 with self.condition:
                     self.condition.notify_all()
             self.runtime.artifacts.finish(stream_id)
+        except Exception as error:
+            item = self.rows[process_id]
+            item['output_error'] = 'audit_unavailable'
+            self._revoke()
+            try:
+                stop_group(item['process'], item['row']['start_marker'])
+            except Exception:
+                item['output_error'] = 'stop_unconfirmed'
+            try:
+                self.runtime.audit.append('process.output_error', 'error', {'channel': channel},
+                                          process_id=process_id, error_code=item['output_error'])
+            except Exception:
+                pass  # Authority is already revoked and the owned group has been stopped.
         finally:
             stream.close()
             with self.condition:
@@ -80,7 +122,7 @@ class ProcessManager:
                    for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr))]
         for reader in readers:
             reader.start()
-        timer = threading.Timer(timeout, lambda: self.stop(process_id, reason="timeout"))
+        timer = threading.Timer(timeout, lambda: self._timeout(process_id))
         timer.daemon = True
         timer.start()
         try:
@@ -91,14 +133,32 @@ class ProcessManager:
                 reader.join()
             with self.condition:
                 row = item["row"]
-                row.update(state="exited", exit_code=code)
+                row.update(state="exited", exit_code=code, output_error=item.get('output_error'))
+                status = 'ok' if code == 0 and not item.get('output_error') else 'error'
                 write_json(self.root / f"{process_id}.json", row)
-                self.runtime.journal.finish(row["execution_id"], row["op_id"], {"status": "ok" if code == 0 else "error", "data": dict(row)})
-                self.runtime.audit.append("process.end", "ok" if code == 0 else "error", {"exit_code": code}, process_id=process_id)
-                item["done"] = True
-                self.condition.notify_all()
+                try:
+                    self.runtime.journal.finish(row["execution_id"], row["op_id"], {"status": status, "data": dict(row)})
+                    self.runtime.audit.append("process.end", status, {"exit_code": code}, process_id=process_id)
+                finally:
+                    item["done"] = not group_alive(proc.pid)
+                    self.condition.notify_all()
+        except Exception:
+            self._revoke()
+            item['row']['output_error'] = 'audit_unavailable'
         finally:
             timer.cancel()
+            with self.condition:
+                try:
+                    item['done'] = proc.poll() is not None and not group_alive(proc.pid)
+                except Exception:
+                    item['done'] = False
+                self.condition.notify_all()
+
+    def _timeout(self, process_id):
+        try:
+            self.stop(process_id, reason='timeout')
+        except Exception:
+            self._revoke()
 
     def output(self, process_id, cursor=0, wait_seconds=0):
         with self.condition:
@@ -123,7 +183,12 @@ class ProcessManager:
             if item is None:
                 raise BridgeError("process_not_found", "进程不属于本次执行")
             proc = item["process"]
-            self.runtime.audit.append("process.stop", "running", {"reason": reason}, process_id=process_id)
+            audit_error = None
+            try:
+                self.runtime.audit.append("process.stop", "running", {"reason": reason}, process_id=process_id)
+            except Exception as error:
+                self._revoke()
+                audit_error = error
         if not item["done"]:
             stop_group(proc, item['row']['start_marker'])
             deadline = time.monotonic() + 10
@@ -132,8 +197,16 @@ class ProcessManager:
                     self.condition.wait(timeout=.05)
         if not item["done"]:
             raise BridgeError("stop_unconfirmed", "无法确认命令进程组已退出")
+        if audit_error is not None:
+            raise BridgeError('audit_unavailable', '命令已停止，但停止日志无法写入') from audit_error
         return dict(item["row"])
 
     def stop_all(self):
+        errors = []
         for process_id in list(self.rows):
-            self.stop(process_id)
+            try:
+                self.stop(process_id)
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise errors[0]

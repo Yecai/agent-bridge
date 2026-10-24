@@ -59,3 +59,27 @@ async def test_interactive_child_has_controlling_terminal(tmp_path):
         await remote.handle({'action':'cancel'})
         if remote.master is not None:
             os.close(remote.master)
+
+
+async def test_same_execution_cannot_change_launch_arguments(tmp_path):
+    import pytest
+    from agentbridge.errors import BridgeError
+    remote=RemoteExecution(tmp_path,'stable',0)
+    frame={'action':'start','argv':[sys.executable,'-c','import time;time.sleep(30)'],'cwd':str(tmp_path),'mode':'print','prompt':'one'}
+    await remote.handle(frame)
+    try:
+        with pytest.raises(BridgeError,match='execution_conflict'):
+            await remote.handle({**frame,'prompt':'different'})
+    finally:
+        await remote.handle({'action':'cancel'})
+
+
+async def test_expired_remote_lease_stops_real_owned_process(tmp_path):
+    from agentbridge.remote import serve_remote
+    from agentbridge.procutil import group_alive
+    frame={'action':'start','argv':[sys.executable,'-c','import time;time.sleep(30)'],'cwd':str(tmp_path),'mode':'print','prompt':''}
+    await asyncio.wait_for(serve_remote(tmp_path,'lease-execution',0,tmp_path/'lease.sock',frame,ttl=.2),3)
+    import json
+    row=json.loads((tmp_path/'status.json').read_text())
+    assert row['state']=='exited' and row['stop_confirmed']
+    assert not group_alive(row['pid'])
