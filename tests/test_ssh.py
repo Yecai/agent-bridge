@@ -48,3 +48,23 @@ async def test_ssh_identity_and_loopback_reverse(ssh_fixture, tmp_path):
     with pytest.raises(BridgeError, match='host_untrusted'):
         async with connect_target(unknown):
             pytest.fail('untrusted')
+
+
+async def test_listener_verification_rejects_server_wildcard_override():
+    import json
+    from agentbridge.ssh import verify_reverse_listener
+    class Connection:
+        addresses=['127.0.0.1']
+        async def create_process(self,command):
+            outer=self
+            class Process:
+                exit_status=0
+                async def communicate(self,data):
+                    assert json.loads(data)['port']==12345
+                    return json.dumps({'addresses':outer.addresses}),''
+            return Process()
+    connection=Connection()
+    await verify_reverse_listener(connection,12345)
+    connection.addresses=['0.0.0.0','127.0.0.1']
+    with pytest.raises(BridgeError,match='forwarding_exposed'):
+        await verify_reverse_listener(connection,12345)

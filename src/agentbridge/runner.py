@@ -19,7 +19,7 @@ from .redact import redact
 from .runtime import Runtime
 from .server import serve
 from .sessions import JsonLines
-from .ssh import connect_target, reverse_mcp
+from .ssh import connect_target, reverse_mcp, verify_reverse_listener
 from .storage import write_json
 
 
@@ -48,6 +48,15 @@ class Runner:
         self.connections, self.tunnel, self.local_port = None, None, None
 
     async def remote(self, action, **fields):
+        if action == 'input':
+            try:
+                value = base64.b64decode(fields['data'], validate=True)
+                refs = self.runtime.artifacts.append('local:input', value)
+                self.runtime.audit.append('claude.input', 'received', {'bytes': len(value)}, artifact_refs=refs)
+            except Exception as error:
+                self.runtime.revoke()
+                self.cancelled.set()
+                raise BridgeError('audit_unavailable', '交互输入无法记录，已撤销执行权限') from error
         frame = {'action': action, 'execution_id': self.spec.execution_id,
                  'revision': self.spec.control_revision, 'request_id': str(uuid4()), **fields}
         failed_connection = self.connection
@@ -98,6 +107,7 @@ class Runner:
                         await self._rpc({'action': 'renew', 'execution_id': self.spec.execution_id,
                                          'revision': self.spec.control_revision, 'request_id': str(uuid4())})
                     self.tunnel = await reverse_mcp(connection, self.local_port, self.remote_port)
+                    await verify_reverse_listener(connection, self.remote_port)
                     if status.get('state') == 'running' and not self.cancelled.is_set():
                         self.runtime.resume_transport(ticket)
                     self.runtime.audit.append('ssh.reconnected', 'ok', {'remote_pid': status.get('pid'), 'remote_port': self.remote_port})
@@ -187,6 +197,7 @@ class Runner:
                     tunnel = await reverse_mcp(connection, urlsplit(url).port)
                     self.tunnel, self.local_port = tunnel, urlsplit(url).port
                     self.remote_port = tunnel.get_port()
+                    await verify_reverse_listener(connection, self.remote_port)
                     deployment = await deploy(connection, runtime)
                     self.remote_python = deployment['python']
                     runtime.audit.append('remote.deployed', 'ok', {'wheel_sha256': deployment['sha256']})
@@ -246,6 +257,7 @@ class Runner:
                 error_code = 'stop_unconfirmed'
             for channel in ('stdout', 'stderr', 'transcript'):
                 runtime.artifacts.finish('remote:' + channel)
+            runtime.artifacts.finish('local:input')
             for event in self.parser.finish():
                 self.event(event)
             # A failure before any remote spawn needs no remote stop confirmation.

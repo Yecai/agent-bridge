@@ -35,3 +35,51 @@ def test_local_execution_request_identity_is_immutable(spec,tmp_path,monkeypatch
     ensure_request_identity(spec)
     with pytest.raises(BridgeError,match='execution_conflict'):
         ensure_request_identity(spec.model_copy(update={'prompt':'changed'}))
+
+
+async def test_local_daemon_keeps_interactive_input_until_remote_ready(spec,tmp_path,monkeypatch):
+    import asyncio,base64
+    from types import SimpleNamespace
+    from agentbridge import local,state
+    from agentbridge.supervisor import control
+    monkeypatch.setenv('AGENTBRIDGE_STATE',str(tmp_path/'state'))
+    spec.mode='interactive'
+    ready=asyncio.Event();received=[]
+    class FakeRunner:
+        def __init__(self,request,updated):
+            self.runtime=SimpleNamespace(revoke=lambda:None)
+            self.connection=None
+            self.cancelled=asyncio.Event();self.updated=updated
+        async def remote(self,action,**fields):
+            assert ready.is_set()
+            received.append((action,fields));return {'state':'running'}
+        async def run(self):
+            await ready.wait()
+            self.connection=True
+            self.updated({'state':'running'})
+            await self.cancelled.wait()
+            self.updated({'state':'exited','stop_confirmed':True})
+    monkeypatch.setattr(local,'Runner',FakeRunner)
+    running=asyncio.create_task(local.daemon(spec))
+    try:
+        for _ in range(200):
+            if state.address(spec.execution_id).exists():break
+            await asyncio.sleep(.01)
+        result=await control(state.address(spec.execution_id),spec.execution_id,spec.control_revision,
+                             {'action':'input','data':base64.b64encode(b'early-input').decode()})
+        assert result['state']=='queued'
+        assert not received
+        ready.set()
+        for _ in range(100):
+            if received:break
+            await asyncio.sleep(.01)
+        assert received[0][0]=='input'
+        assert base64.b64decode(received[0][1]['data'])==b'early-input'
+        await control(state.address(spec.execution_id),spec.execution_id,spec.control_revision,{'action':'cancel'})
+        await asyncio.wait_for(running,5)
+    finally:
+        ready.set()
+        if not running.done():
+            running.cancel()
+            try:await running
+            except asyncio.CancelledError:pass
