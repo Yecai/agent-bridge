@@ -83,3 +83,19 @@ async def test_expired_remote_lease_stops_real_owned_process(tmp_path):
     row=json.loads((tmp_path/'status.json').read_text())
     assert row['state']=='exited' and row['stop_confirmed']
     assert not group_alive(row['pid'])
+
+
+async def test_remote_child_runs_as_sandbox_for_root_bypass(tmp_path):
+    remote = RemoteExecution(tmp_path, 'execution', 4, ttl=1)
+    script = 'import os; print("sandbox=" + os.environ.get("IS_SANDBOX", ""), flush=True)'
+    await remote.handle({'action': 'start', 'argv': [sys.executable, '-c', script],
+                         'cwd': str(tmp_path), 'mode': 'print', 'prompt': ''})
+    output = b''
+    for _ in range(50):
+        await asyncio.sleep(.1)
+        events = await remote.handle({'action': 'events', 'cursor': 0})
+        output = base64.b64decode(events['stdout'])
+        if b'sandbox=' in output:
+            break
+    assert b'sandbox=1' in output
+    await remote.handle({'action': 'cancel'})

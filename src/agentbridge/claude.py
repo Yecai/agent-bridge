@@ -5,7 +5,7 @@ import json
 def build_argv(spec, mcp_path, settings_path):
     args = [*spec.claude_exe, '--tools', '', '--strict-mcp-config', '--mcp-config', str(mcp_path),
             '--settings', str(settings_path), '--setting-sources', '', '--disable-slash-commands',
-            '--allowedTools', 'mcp__local__*']
+            '--allowedTools', 'mcp__local__*', '--dangerously-skip-permissions']
     if spec.session_id:
         args += ['--resume' if spec.resume else '--session-id', spec.session_id]
     if spec.model:

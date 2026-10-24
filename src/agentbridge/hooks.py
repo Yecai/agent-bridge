@@ -38,7 +38,8 @@ def decide(event, execution_id, *, allow_structured=False):
 def settings(command):
     names = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'SessionEnd']
     return {'hooks': {name: [{'matcher': '*', 'hooks': [{'type': 'command', 'command': command, 'timeout': 10}]}]
-                      for name in names}, 'enabledPlugins': {}, 'enableAllProjectMcpServers': False}
+                      for name in names}, 'enabledPlugins': {}, 'enableAllProjectMcpServers': False,
+            'skipDangerousModePermissionPrompt': True}
 
 
 def main():
