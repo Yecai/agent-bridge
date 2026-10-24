@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import re
 import secrets
 import threading
 import time
@@ -12,6 +14,7 @@ from .errors import BridgeError
 from .files import FileTools
 from .journal import Journal
 from .processes import ProcessManager
+from .redact import redact
 from .search import SearchTools
 from .workspace import Workspace
 
@@ -25,8 +28,10 @@ class Runtime:
         self.spec, self.token, self.enabled = spec, secrets.token_urlsafe(32), True
         self.pending_action = None
         self.requested_stop = False
+        self.revocation = 0
         self._action_lock = threading.RLock()
-        self.secrets = spec.secrets() + [self.token.encode()]
+        self.secrets = spec.secrets() + [self.token.encode()] + [value.encode() for key, value in os.environ.items()
+                       if re.search(r'key|token|password|secret', key, re.I) and len(value) >= 8]
         self.audit = AuditLog(spec.log_dir, spec.public_context(), self.secrets)
         self.artifacts = Artifacts(spec.log_dir / "artifacts", self.secrets)
         self.journal = Journal(spec.log_dir / "operations.sqlite3")
@@ -40,7 +45,20 @@ class Runtime:
         return READ_TOOLS if self.spec.access == "read" else READ_TOOLS | WRITE_TOOLS | (HOST_TOOLS & self.spec.callbacks.keys())
 
     def revoke(self):
-        self.enabled = False
+        with self._action_lock:
+            self.revocation += 1
+            self.enabled = False
+
+    def pause_transport(self):
+        with self._action_lock:
+            allowed = self.enabled
+            self.enabled = False
+            return self.revocation, allowed
+
+    def resume_transport(self, ticket):
+        with self._action_lock:
+            if ticket[1] and self.revocation == ticket[0]:
+                self.enabled = True
 
     def hook(self, event):
         if event.get('hook_event_name') != 'PostToolUse':
@@ -60,7 +78,7 @@ class Runtime:
     def call(self, name, arguments, meta):
         started = time.monotonic()
         try:
-            args_ref = self.artifacts.put(json.dumps(arguments, ensure_ascii=False).encode())
+            args_ref = self.artifacts.put(json.dumps(redact(arguments, self.secrets), ensure_ascii=False).encode())
             self.audit.append("tool.begin", "running", {"tool": name}, tool_call_id=meta.tool_call_id, op_id=meta.op_id, artifact_refs=args_ref)
             if not self.enabled or meta.execution_id != self.spec.execution_id or meta.control_revision != self.spec.control_revision:
                 raise BridgeError("control_lost", "执行归属已失效")
@@ -99,10 +117,10 @@ class Runtime:
                     if data.get('state') != 'accepted' or not isinstance(data.get('receipt'), str):
                         raise BridgeError('callback_invalid', '宿主未返回有效接收回执')
                     self.pending_action = {'name': name, 'op_id': meta.op_id, 'receipt': data['receipt'], 'acked': False}
-            refs = self.artifacts.put(json.dumps(data, ensure_ascii=False).encode())
+            refs = self.artifacts.put(json.dumps(redact(data, self.secrets), ensure_ascii=False).encode())
             result = {"status": "running" if data.get("state") == "running" else "ok", "data": data, "artifact_refs": refs}
             if mutation:
-                self.journal.finish(self.spec.execution_id, meta.op_id, result)
+                self.journal.finish(self.spec.execution_id, meta.op_id, redact(result, self.secrets))
             self.audit.append("tool.end", result["status"], {"tool": name}, tool_call_id=meta.tool_call_id,
                               op_id=meta.op_id, artifact_refs=refs, duration_ms=int((time.monotonic() - started) * 1000))
             return result

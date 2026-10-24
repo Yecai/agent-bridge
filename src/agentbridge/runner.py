@@ -4,9 +4,12 @@ import hashlib
 import json
 import shlex
 import time
+from contextlib import AsyncExitStack
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
+
+import asyncssh
 
 from . import hooks
 from .bootstrap import deploy
@@ -41,12 +44,28 @@ class Runner:
         self.transcript_parser = JsonLines()
         self.transcript_offset = -1
         self.transcript_gap = None
+        self.reconnect_lock = asyncio.Lock()
+        self.connections, self.tunnel, self.local_port = None, None, None
 
     async def remote(self, action, **fields):
         frame = {'action': action, 'execution_id': self.spec.execution_id,
                  'revision': self.spec.control_revision, 'request_id': str(uuid4()), **fields}
+        failed_connection = self.connection
+        try:
+            return await self._rpc(frame)
+        except (OSError, TimeoutError, asyncssh.Error) as error:
+            if action == 'input':
+                self.runtime.revoke()
+                raise BridgeError('input_outcome_unknown', '交互输入回执丢失，禁止自动重放') from error
+            await self._reconnect(failed_connection)
+            # start is bound to the same execution and remote fingerprint; no new session.
+            return await self._rpc(frame)
+
+    async def _rpc(self, frame):
         process = await self.connection.create_process(shlex.join([self.remote_python, '-m', 'agentbridge', '_remote']))
         stdout, stderr = await asyncio.wait_for(process.communicate(json.dumps(frame)), 30)
+        if self.connection.is_closed():
+            raise OSError('SSH control channel disconnected')
         if process.exit_status != 0:
             try:
                 code = json.loads(stderr)['error_code']
@@ -55,6 +74,43 @@ class Runner:
             raise BridgeError(code, '远端控制请求失败')
         reply = json.loads(stdout)
         return reply
+
+    async def _reconnect(self, failed_connection):
+        async with self.reconnect_lock:
+            if self.connection is not failed_connection:
+                return
+            ticket = self.runtime.pause_transport()
+            self.runtime.audit.append('ssh.disconnected', 'running', {'remote_port': self.remote_port})
+            failed_connection.close()
+            await failed_connection.wait_closed()
+            deadline = time.monotonic() + 40
+            while True:
+                connection = None
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise BridgeError('reconnect_timeout', '短时重连窗口已结束，保留停止未知状态')
+                    connection = await asyncio.wait_for(self.connections.enter_async_context(connect_target(self.spec.target)), remaining)
+                    self.connection = connection
+                    status = await self._rpc({'action': 'status', 'execution_id': self.spec.execution_id,
+                                              'revision': self.spec.control_revision, 'request_id': str(uuid4())})
+                    if status.get('state') == 'running':
+                        await self._rpc({'action': 'renew', 'execution_id': self.spec.execution_id,
+                                         'revision': self.spec.control_revision, 'request_id': str(uuid4())})
+                    self.tunnel = await reverse_mcp(connection, self.local_port, self.remote_port)
+                    if status.get('state') == 'running' and not self.cancelled.is_set():
+                        self.runtime.resume_transport(ticket)
+                    self.runtime.audit.append('ssh.reconnected', 'ok', {'remote_pid': status.get('pid'), 'remote_port': self.remote_port})
+                    return
+                except (OSError, TimeoutError, asyncssh.Error, BridgeError) as error:
+                    if connection:
+                        connection.close()
+                        await connection.wait_closed()
+                    if isinstance(error, BridgeError) and error.code not in {'ssh_unavailable', 'forwarding_denied'}:
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise BridgeError('reconnect_timeout', '重连失败，等待远端租约停止并保留名额') from error
+                    await asyncio.sleep(.5)
 
     async def _configure(self, deployment):
         spec = self.spec
@@ -106,7 +162,8 @@ class Runner:
                     for event in self.transcript_parser.feed(data):
                         offset = event.get('offset')
                         if isinstance(offset, int) and offset > self.transcript_offset:
-                            self.runtime.audit.append('claude.transcript', 'received', data=event.get('data'),
+                            status = 'error' if (event.get('data') or {}).get('type') == 'bridge.invalid_transcript' else 'received'
+                            self.runtime.audit.append('claude.transcript', status, data=event.get('data'),
                                                       session_id=event.get('session_id'), details={'source_offset': offset})
                             self.transcript_offset = offset
         if row.get('transcript_gap') != self.transcript_gap:
@@ -122,10 +179,13 @@ class Runner:
         code, error_code, local_stopped, remote_stopped = 1, None, False, False
         try:
             async with serve(runtime) as url:
-                async with connect_target(spec.target) as connection:
+                async with AsyncExitStack() as connections:
+                    self.connections = connections
+                    connection = await connections.enter_async_context(connect_target(spec.target))
                     self.connection = connection
                     runtime.audit.append('ssh.connected', 'ok')
                     tunnel = await reverse_mcp(connection, urlsplit(url).port)
+                    self.tunnel, self.local_port = tunnel, urlsplit(url).port
                     self.remote_port = tunnel.get_port()
                     deployment = await deploy(connection, runtime)
                     self.remote_python = deployment['python']
@@ -162,8 +222,8 @@ class Runner:
                         runtime.audit.append('remote.stopped', 'ok' if remote_stopped else 'stop_unconfirmed',
                                              {'exit_code': stopped.get('exit_code')})
                         await self.collect()
-                        tunnel.close()
-                        await tunnel.wait_closed()
+                        self.tunnel.close()
+                        await self.tunnel.wait_closed()
                     if not remote_stopped:
                         raise BridgeError('stop_unconfirmed', '远端停止未确认')
                     code = 0 if runtime.requested_stop or (not self.cancelled.is_set() and row.get('exit_code') == 0) else 1

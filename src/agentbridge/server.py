@@ -107,6 +107,26 @@ class AuthGate:
         self.app, self.runtime = app, runtime
 
     async def __call__(self, scope, receive, send):
+        started = False
+        async def tracked(message):
+            nonlocal started
+            if message['type'] == 'http.response.start':
+                started = True
+            await send(message)
+        try:
+            return await self.handle(scope, receive, tracked)
+        except Exception:
+            self.runtime.revoke()
+            try:
+                await asyncio.to_thread(self.runtime.processes.stop_all)
+            except Exception:
+                pass
+            if started:
+                raise
+            await send({'type': 'http.response.start', 'status': 503, 'headers': []})
+            await send({'type': 'http.response.body', 'body': b'{"error":"audit_unavailable"}'})
+
+    async def handle(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         headers = {k.lower(): v for k, v in scope.get("headers", [])}

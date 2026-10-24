@@ -18,6 +18,8 @@ def main():
         print('{"loggedIn":true}')
         return
     prompt = sys.stdin.read()
+    if os.environ.get('AGENTBRIDGE_FAKE_DELAY'):
+        __import__('time').sleep(float(os.environ['AGENTBRIDGE_FAKE_DELAY']))
     config = json.load(open(args[args.index('--mcp-config') + 1]))['mcpServers']['local']
     counter = 0
 

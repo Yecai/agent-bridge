@@ -31,7 +31,13 @@ class RemoteExecution:
         self.readers = []
         self.failure = None
         self.cancel_lock = asyncio.Lock()
-        self.secrets = []
+        self.secrets = [value.encode() for key, value in os.environ.items()
+                        if key.startswith(('ANTHROPIC_', 'CLAUDE_CODE_')) and key.endswith(('KEY', 'TOKEN')) and value]
+        hook_config = self.root / 'hook.json'
+        if hook_config.is_file() and not hook_config.is_symlink():
+            token = json.loads(hook_config.read_text()).get('token')
+            if isinstance(token, str) and token:
+                self.secrets.append(token.encode())
         self.transcript_gap = None
 
     def _capture_transcript(self):
@@ -72,6 +78,7 @@ class RemoteExecution:
                 try:
                     data = json.loads(line)
                 except (ValueError, UnicodeDecodeError):
+                    self.transcript_gap = 'invalid_event'
                     data = {'type': 'bridge.invalid_transcript',
                             'base64': base64.b64encode(redact_bytes(line, self.secrets)).decode()}
                 event = redact({'offset': offset, 'session_id': metadata['session_id'], 'data': data}, self.secrets)
@@ -155,7 +162,7 @@ class RemoteExecution:
             self.row.update(state='running', pid=self.proc.pid, start_marker=start_marker(self.proc.pid), stop_confirmed=False,
                             fingerprint=fingerprint, session_id=frame.get('session_id'))
             self._persist()
-            secrets = [s.encode() for s in frame.get('secrets', [])]
+            secrets = self.secrets + [s.encode() for s in frame.get('secrets', [])]
             secrets += [value.encode() for key, value in env.items() if key.startswith(('ANTHROPIC_', 'CLAUDE_CODE_'))
                         and key.endswith(('KEY', 'TOKEN')) and value]
             self.secrets = secrets

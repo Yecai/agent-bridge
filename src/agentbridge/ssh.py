@@ -29,8 +29,8 @@ async def connect_target(target):
         await connection.wait_closed()
 
 
-async def reverse_mcp(connection, local_port):
+async def reverse_mcp(connection, local_port, remote_port=0):
     try:
-        return await connection.forward_remote_port('127.0.0.1', 0, '127.0.0.1', local_port)
+        return await connection.forward_remote_port('127.0.0.1', remote_port, '127.0.0.1', local_port)
     except (OSError, asyncssh.Error) as exc:
         raise BridgeError('forwarding_denied', '无法建立远端回环反向隧道') from exc

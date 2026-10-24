@@ -20,7 +20,8 @@ class Server(asyncssh.SSHServer):
         return host == '127.0.0.1'
 
 
-async def test_real_ssh_runner_and_local_tools(tmp_path, monkeypatch):
+@pytest.mark.parametrize('disconnect', [False, True])
+async def test_real_ssh_runner_and_local_tools(tmp_path, monkeypatch, disconnect):
     remote_home = tmp_path / 'remote-home'
     remote_home.mkdir()
     class SFTP(asyncssh.SFTPServer):
@@ -31,7 +32,8 @@ async def test_real_ssh_runner_and_local_tools(tmp_path, monkeypatch):
         argv = shlex.split(channel.command)
         if argv[0] == 'python3':
             argv[0] = sys.executable
-        env = {**os.environ, 'AGENTBRIDGE_REMOTE_ROOT': str(remote_home / '.local/share/agentbridge/executions')}
+        env = {**os.environ, 'AGENTBRIDGE_REMOTE_ROOT': str(remote_home / '.local/share/agentbridge/executions'),
+               'AGENTBRIDGE_FAKE_DELAY': '2' if disconnect else '0'}
         proc = await asyncio.create_subprocess_exec(*argv, cwd=remote_home, env=env,
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         data = (await channel.stdin.read()).encode()
@@ -51,6 +53,17 @@ async def test_real_ssh_runner_and_local_tools(tmp_path, monkeypatch):
     spec.claude_exe = [sys.executable, str(Path(__file__).parents[1] / 'fixtures/fake_claude.py')]
     spec.prompt = 'use local tools'
     runner = Runner(spec)
+    if disconnect:
+        original = runner.collect
+        disconnected = False
+        async def collect():
+            nonlocal disconnected
+            if not disconnected:
+                disconnected = True
+                runner.connection.close()
+                await runner.connection.wait_closed()
+            return await original()
+        runner.collect = collect
     try:
         result = await asyncio.wait_for(runner.run(), 60)
         if command_errors:
@@ -61,6 +74,8 @@ async def test_real_ssh_runner_and_local_tools(tmp_path, monkeypatch):
         assert (spec.cwd / 'proof.txt').read_text() == 'remote-claude-local-file'
         assert runner.result['structured_output']['cwd'] == str(spec.cwd.resolve())
         assert runner.remote_status['stop_confirmed']
+        if disconnect:
+            assert any(row['event'] == 'ssh.reconnected' for row in runner.runtime.audit.read()['events'])
     finally:
         server.close()
         await server.wait_closed()
