@@ -90,3 +90,27 @@ def test_registration_failure_never_releases_command_gate(manager,spec,monkeypat
             from agentbridge.procutil import stop_group
             stop_group(item['process'],item['row']['start_marker'])
             item['done']=True
+
+
+def test_owner_kill_stops_local_command_group(spec,tmp_path):
+    import json,os,signal,subprocess
+    from agentbridge.cli import private_request
+    from agentbridge.procutil import group_alive,start_marker
+    request=tmp_path/'request.json';request.write_text(private_request(spec));request.chmod(0o600)
+    script=tmp_path/'owner.py'
+    script.write_text('from pathlib import Path\nfrom agentbridge.protocol import RunSpec\nfrom agentbridge.runtime import Runtime\nimport json,sys,time\nspec=RunSpec.model_validate_json(Path(sys.argv[1]).read_text())\nruntime=Runtime(spec)\nrow=runtime.processes.start([sys.executable,"-c","import time;time.sleep(60)"],spec.cwd,"owner-kill")\nprint(json.dumps(row),flush=True)\ntime.sleep(60)\n')
+    owner=subprocess.Popen([sys.executable,str(script),str(request)],stdout=subprocess.PIPE,text=True)
+    row=None
+    try:
+        row=json.loads(owner.stdout.readline())
+        os.kill(owner.pid,signal.SIGKILL);owner.wait(timeout=5)
+        deadline=time.monotonic()+5
+        while group_alive(row['pid']) and time.monotonic()<deadline:
+            time.sleep(.05)
+        assert not group_alive(row['pid'])
+    finally:
+        if owner.poll() is None:
+            owner.kill();owner.wait()
+        owner.stdout.close()
+        if row and group_alive(row['pid']) and start_marker(row['pid'])==row['start_marker']:
+            os.killpg(row['pid'],signal.SIGKILL)

@@ -56,11 +56,13 @@ class ProcessManager:
                 own_bin = os.path.join(os.environ["VIRTUAL_ENV"], "bin")
                 env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep) if p != own_bin)
             read_fd, write_fd = os.pipe()
+            owner_read, owner_write = os.pipe()
+            watch_owned = False
             process = None
             marker = None
             try:
-                process = subprocess.Popen([sys.executable, '-m', 'agentbridge', '_process', str(read_fd), *argv],
-                                           pass_fds=(read_fd,), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                process = subprocess.Popen([sys.executable, '-m', 'agentbridge', '_process', str(read_fd), str(owner_read), *argv],
+                                           pass_fds=(read_fd, owner_read), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 marker = start_marker(process.pid)
                 row = {"process_id": process_id, "execution_id": spec.execution_id, "pid": process.pid,
@@ -68,12 +70,14 @@ class ProcessManager:
                 write_json(self.root / f"{process_id}.json", row)
                 self.runtime.journal.bind_process(spec.execution_id, op_id, process_id)
                 self.runtime.journal.finish(spec.execution_id, op_id, {"status": "running", "data": dict(row)})
-                self.rows[process_id] = {"row": row, "process": process, "done": False}
+                self.rows[process_id] = {"row": row, "process": process, "done": False, 'owner_fd': owner_write}
                 os.write(write_fd, b'1')
                 threading.Thread(target=self._monitor, args=(process_id, max(1, min(timeout, 86400))), daemon=True).start()
+                watch_owned = True
                 return dict(row)
             except BaseException:
                 self._revoke()
+                self.rows.pop(process_id, None)
                 if process is not None:
                     if marker:
                         stop_group(process, marker)
@@ -86,6 +90,9 @@ class ProcessManager:
             finally:
                 os.close(read_fd)
                 os.close(write_fd)
+                os.close(owner_read)
+                if not watch_owned:
+                    os.close(owner_write)
 
     def _reader(self, process_id, channel, stream):
         stream_id = f"{process_id}:{channel}"
@@ -147,6 +154,9 @@ class ProcessManager:
             item['row']['output_error'] = 'audit_unavailable'
         finally:
             timer.cancel()
+            owner_fd = item.pop('owner_fd', None)
+            if owner_fd is not None:
+                os.close(owner_fd)
             with self.condition:
                 try:
                     item['done'] = proc.poll() is not None and not group_alive(proc.pid)

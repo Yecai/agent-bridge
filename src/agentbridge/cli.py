@@ -159,12 +159,23 @@ async def run_cli(spec):
 
 def main():
     # Remote actions remain stdlib-only; local dependencies are loaded lazily.
-    if len(sys.argv) > 3 and sys.argv[1] == '_process':
+    if len(sys.argv) > 2 and sys.argv[1] == '_guard':
+        fd = int(sys.argv[2])
+        while os.read(fd, 1):
+            pass
+        os.close(fd)
+        # The watchdog is a member of the exact owned group; it never targets an unrelated PID.
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+    if len(sys.argv) > 4 and sys.argv[1] == '_process':
         fd = int(sys.argv[2])
         permitted = os.read(fd, 1) == b'1'
         os.close(fd)
         if permitted:
-            os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
+            owner_fd = int(sys.argv[3])
+            subprocess.Popen([sys.executable, '-m', 'agentbridge', '_guard', str(owner_fd)], pass_fds=(owner_fd,),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.close(owner_fd)
+            os.execvpe(sys.argv[4], sys.argv[4:], os.environ)
         sys.exit(1)
     if len(sys.argv) > 2 and sys.argv[1] == '_pty':
         import fcntl
