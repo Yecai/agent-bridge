@@ -47,6 +47,7 @@ class Runner:
         self.transcript_offset = -1
         self.transcript_gap = None
         self.reconnect_lock = asyncio.Lock()
+        self.rpc_lock = asyncio.Lock()
         self.connections, self.tunnel, self.local_port = None, None, None
         self.remote_cwd = None
         self.startup_output = bytearray()
@@ -97,24 +98,29 @@ class Runner:
         except (OSError, TimeoutError, asyncssh.Error) as error:
             if action == 'input':
                 self.runtime.revoke()
+            self.runtime.audit.append('ssh.control_error', 'error',
+                                      {'action': action, 'error_type': type(error).__name__})
+            if action == 'input':
                 raise BridgeError('input_outcome_unknown', '交互输入回执丢失，禁止自动重放') from error
             await self._reconnect(failed_connection)
             # start is bound to the same execution and remote fingerprint; no new session.
             return await self._rpc(frame)
 
     async def _rpc(self, frame):
-        process = await self.connection.create_process(shlex.join([self.remote_python, '-m', 'agentbridge', '_remote']))
-        stdout, stderr = await asyncio.wait_for(process.communicate(json.dumps(frame)), 30)
-        if self.connection.is_closed():
-            raise OSError('SSH control channel disconnected')
-        if process.exit_status != 0:
-            try:
-                code = json.loads(stderr)['error_code']
-            except (ValueError, KeyError):
-                code = 'remote_control_failed'
-            raise BridgeError(code, '远端控制请求失败')
-        reply = json.loads(stdout)
-        return reply
+        # Mouse motion can enqueue many inputs at once; keep SSH session channels bounded.
+        async with self.rpc_lock:
+            process = await self.connection.create_process(shlex.join([self.remote_python, '-m', 'agentbridge', '_remote']))
+            stdout, stderr = await asyncio.wait_for(process.communicate(json.dumps(frame)), 30)
+            if self.connection.is_closed():
+                raise OSError('SSH control channel disconnected')
+            if process.exit_status != 0:
+                try:
+                    code = json.loads(stderr)['error_code']
+                except (ValueError, KeyError):
+                    code = 'remote_control_failed'
+                raise BridgeError(code, '远端控制请求失败')
+            reply = json.loads(stdout)
+            return reply
 
     async def _reconnect(self, failed_connection):
         async with self.reconnect_lock:
