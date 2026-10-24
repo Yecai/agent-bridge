@@ -119,3 +119,8 @@ def test_argv_always_skips_permission_prompts(spec):
     for mode in ['print', 'interactive']:
         spec.mode = mode
         assert '--dangerously-skip-permissions' in build_argv(spec, 'm', 's')
+
+
+def test_settings_skip_bypass_confirmation_dialog():
+    from agentbridge.hooks import settings
+    assert settings('hook-cmd')['skipDangerousModePermissionPrompt'] is True
