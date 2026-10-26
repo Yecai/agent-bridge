@@ -15,7 +15,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from .protocol import ToolMeta
 
 
-def build_server(runtime):
+def build_mcp(runtime):
     mcp = FastMCP("local", stateless_http=True, json_response=True, log_level="ERROR",
                   transport_security=TransportSecuritySettings(allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
                                                                allowed_origins=["http://127.0.0.1:*", "http://localhost:*"]))
@@ -96,7 +96,11 @@ def build_server(runtime):
 
     for name in (set(READ_NAMES) | {"write_file", "apply_patch", "exec", "process_output", "process_stop", "dev_handoff", "dev_finish"}) - runtime.allowed_tools:
         mcp.remove_tool(name)
-    return AuthGate(mcp.streamable_http_app(), runtime)
+    return mcp
+
+
+def build_server(runtime):
+    return AuthGate(build_mcp(runtime).streamable_http_app(), runtime)
 
 
 READ_NAMES = {"workspace_context", "read_file", "list_directory", "glob", "grep"}

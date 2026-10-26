@@ -255,6 +255,17 @@ def main():
             print(json.dumps({'error_code': exc.code if isinstance(exc, BridgeError) else 'remote_failed'}), file=sys.stderr)
             sys.exit(1)
         return
+    if len(sys.argv) > 1 and sys.argv[1] in {'capabilities', 'tools'}:
+        from . import tool_service
+        try:
+            result = tool_service.capabilities() if sys.argv[1] == 'capabilities' else tool_service.main(sys.argv[2:])
+            if result is not None:
+                print(json.dumps(result, ensure_ascii=False))
+        except Exception as exc:
+            print(json.dumps({'error_code': exc.code if isinstance(exc, BridgeError) else 'bridge_failed',
+                              'message': exc.message if isinstance(exc, BridgeError) else '工具服务请求失败'}), file=sys.stderr)
+            sys.exit(1)
+        return
     parser = argparse.ArgumentParser(prog='agentbridge')
     parser.add_argument('--version', action='version', version=__version__)
     sub = parser.add_subparsers(dest='command', required=True)
