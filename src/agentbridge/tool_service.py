@@ -119,6 +119,18 @@ async def request(execution_id, action, body=None):
             raise
         # Older hosts must also persist this definite pre-dispatch rejection.
         message = '工具参数不符合input_schema，本次未执行；请修正参数后用新事件重试。'
+        from .tool_catalog import describe_async
+        for item in await describe_async('full'):
+            if item['name'] != body.get('name'):
+                continue
+            schema = item['input_schema']
+            arguments = body.get('arguments') or {}
+            missing = [key for key in schema.get('required', []) if key not in arguments]
+            if missing:
+                message += ' 缺少必填字段：' + '、'.join(missing) + '。'
+            allowed = [key for key in schema.get('properties', {}) if key != 'op_id']
+            message += ' 允许字段：' + '、'.join(allowed) + '。'
+            break
         if body.get('name') in {'read_file', 'write_file', 'apply_patch'} and 'path' not in body.get('arguments', {}):
             message += ' 文件路径字段名为path，不能使用file_path。'
         return {'schema_version': 1, 'status': 'error', 'error_code': error.code, 'data': {'message': message}}

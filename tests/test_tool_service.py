@@ -109,6 +109,16 @@ def test_invalid_file_argument_is_a_known_error_for_existing_hosts(tool, spec):
     assert not (spec.cwd/'bad.txt').exists()
 
 
+def test_invalid_patch_names_report_missing_schema_fields_without_input_text(tool):
+    reply = call(tool, 'apply_patch', {'path': 'unchanged.txt', 'expected_version': 'v',
+                 'old': 'PRIVATE_OLD', 'new_string': 'PRIVATE_NEW'})
+    assert reply['error_code'] == 'invalid_arguments'
+    message = reply['data']['message']
+    assert '缺少必填字段：new' in message
+    assert '允许字段：' in message and 'expected_version' in message
+    assert 'PRIVATE_OLD' not in message and 'PRIVATE_NEW' not in message
+
+
 def test_cancel_stops_process_groups_and_revokes_future_calls(tool):
     receipt = call(tool, 'exec', {'command': [sys.executable, '-c', 'import time; time.sleep(60)']})
     assert receipt['data']['state'] == 'running'
