@@ -71,7 +71,7 @@ def build_mcp(runtime):
 
     @mcp.tool()
     def exec(command: str | list[str], ctx: Context, cwd: str = ".", timeout: int = 1800, op_id: str | None = None) -> CallToolResult:
-        """在本机执行 Git、构建和测试。返回 process_id，随后用 process_output 取完整输出。"""
+        """在本机执行Git、构建和测试；验证优先传argv数组。字符串使用Bash pipefail。返回process_id后用process_output取完整输出。"""
         return call("exec", {"command": command, "cwd": cwd, "timeout": timeout}, ctx, op_id)
 
     @mcp.tool()

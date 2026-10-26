@@ -74,3 +74,5 @@ A host must stop and reconcile the old execution before replacing it. Pending to
 For `tools call` / `process_output`, an integer `wait_seconds` is a polling upper bound. The CLI caps values above 5 to 5 seconds before contacting the supervisor, including an already-running older supervisor. Continue with `next_cursor` while the command runs; the polling limit does not change its execution timeout or repeat the command.
 
 Argument rejections include the missing required field names and the allowed fields from the actual tool schema. Input values and file contents are not echoed. For example, an `apply_patch` call using `new_string` is told that the required field is `new`; aliases are not silently applied to mutations.
+
+String commands run in Bash with `pipefail`: a failed test before `| tail` remains a failed process. Prefer argv arrays for verification and retain the complete log or structured report. If a pipeline intentionally ignores a stage failure, handle that explicitly in the command. This default applies to newly started supervisors; running supervisors retain their loaded code.

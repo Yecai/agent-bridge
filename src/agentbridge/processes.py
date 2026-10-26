@@ -33,7 +33,7 @@ class ProcessManager:
         cwd = self.runtime.workspace.resolve(cwd, write=True)
         if not isinstance(command, (str, list)) or not command:
             raise BridgeError("invalid_command", "命令不能为空")
-        argv = ["bash", "-lc", command] if isinstance(command, str) else command
+        argv = ["bash", "-o", "pipefail", "-lc", command] if isinstance(command, str) else command
         if not all(isinstance(value, str) and "\x00" not in value for value in argv):
             raise BridgeError("invalid_command", "命令参数必须是字符串")
         fingerprint = hashlib.sha256(json.dumps([argv, str(cwd), timeout]).encode()).hexdigest()

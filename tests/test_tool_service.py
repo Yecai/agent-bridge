@@ -119,6 +119,18 @@ def test_invalid_patch_names_report_missing_schema_fields_without_input_text(too
     assert 'PRIVATE_OLD' not in message and 'PRIVATE_NEW' not in message
 
 
+def test_shell_pipeline_keeps_upstream_failure_exit_status(tool):
+    receipt = call(tool, 'exec', {'command': "(printf 'fixture-output\\n'; exit 7) | cat"})
+    process_id = receipt['data']['process_id']
+    deadline = time.monotonic()+10
+    while time.monotonic()<deadline:
+        result = call(tool, 'process_output', {'process_id': process_id, 'wait_seconds': 1}, op=str(uuid4()))
+        if result['data']['state']=='exited' and result['data']['output_complete']:
+            break
+    assert result['data']['state']=='exited'
+    assert result['data']['exit_code']==7
+
+
 def test_cancel_stops_process_groups_and_revokes_future_calls(tool):
     receipt = call(tool, 'exec', {'command': [sys.executable, '-c', 'import time; time.sleep(60)']})
     assert receipt['data']['state'] == 'running'
