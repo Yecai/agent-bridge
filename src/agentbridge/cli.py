@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -80,6 +81,43 @@ async def command(execution_id, action, **fields):
         raise BridgeError('supervisor_unavailable', '监督器不可达；执行结果不能重放') from None
 
 
+class TerminalInput:
+    """Keep one input RPC in flight so mouse bursts cannot starve control RPCs."""
+
+    def __init__(self, execution_id):
+        self.execution_id = execution_id
+        self.pending = bytearray()
+        self.dimensions = None
+        self.ready = asyncio.Event()
+        self.error = None
+
+    def feed(self, data):
+        if len(self.pending) + len(data) > 65536:
+            self.error = BridgeError('input_queue_full', '交互输入缓冲已满，停止发送以避免丢失输入')
+        else:
+            self.pending.extend(data)
+        self.ready.set()
+
+    def resize(self, rows, columns):
+        self.dimensions = (rows, columns)
+        self.ready.set()
+
+    async def run(self):
+        while True:
+            await self.ready.wait()
+            self.ready.clear()
+            if self.error:
+                raise self.error
+            if self.pending:
+                data = bytes(self.pending)
+                self.pending.clear()
+                await command(self.execution_id, 'input', data=base64.b64encode(data).decode())
+            if self.dimensions:
+                rows, columns = self.dimensions
+                self.dimensions = None
+                await command(self.execution_id, 'resize', rows=rows, columns=columns)
+
+
 async def run_cli(spec):
     from . import state
     root = state.execution(spec.execution_id)
@@ -109,26 +147,31 @@ async def run_cli(spec):
     seen_gaps = set()
     interactive = spec.mode == 'interactive'
     old_terminal = None
+    input_task = None
     if interactive and sys.stdin.isatty():
         import termios
         import tty
         old_terminal = termios.tcgetattr(sys.stdin)
         tty.setraw(sys.stdin.fileno())
+        terminal = TerminalInput(spec.execution_id)
+        input_task = asyncio.create_task(terminal.run())
 
         def input_ready():
             data = os.read(sys.stdin.fileno(), 65536)
             if data:
-                asyncio.create_task(command(spec.execution_id, 'input', data=base64.b64encode(data).decode()))
+                terminal.feed(data)
             else:
                 stopped.set()
         loop.add_reader(sys.stdin, input_ready)
 
         def resize():
             size = os.get_terminal_size()
-            asyncio.create_task(command(spec.execution_id, 'resize', rows=size.lines, columns=size.columns))
+            terminal.resize(size.lines, size.columns)
         loop.add_signal_handler(signal.SIGWINCH, resize)
     try:
         while True:
+            if input_task is not None and input_task.done():
+                input_task.result()
             if stopped.is_set():
                 await command(spec.execution_id, 'cancel')
                 stopped.clear()
@@ -163,9 +206,14 @@ async def run_cli(spec):
                 return 1
             await asyncio.sleep(.1)
     finally:
+        if input_task is not None:
+            input_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, BridgeError):
+                await input_task
         if old_terminal is not None:
             import termios
             loop.remove_reader(sys.stdin)
+            loop.remove_signal_handler(signal.SIGWINCH)
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_terminal)
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.remove_signal_handler(sig)
