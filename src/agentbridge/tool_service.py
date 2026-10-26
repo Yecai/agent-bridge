@@ -105,9 +105,23 @@ async def request(execution_id, action, body=None):
         if action in {'status', 'cancel', 'renew', 'freeze'}:
             return row
         raise BridgeError('control_lost', '执行已经停止')
+    # A poll wait is an upper bound, not a command timeout. Bound it in the
+    # short-lived CLI so existing supervisors also accept common 10–30s hints.
+    if action == 'call' and isinstance(body, dict) and body.get('name') == 'process_output':
+        arguments = body.get('arguments')
+        if isinstance(arguments, dict) and type(arguments.get('wait_seconds')) is int and arguments['wait_seconds'] > 5:
+            body = {**body, 'arguments': {**arguments, 'wait_seconds': 5}}
     try:
         return await control(state.address(execution_id), execution_id, row['revision'],
                              {'action': action, 'body': body or {}}, timeout=25)
+    except BridgeError as error:
+        if action != 'call' or error.code != 'invalid_arguments':
+            raise
+        # Older hosts must also persist this definite pre-dispatch rejection.
+        message = '工具参数不符合input_schema，本次未执行；请修正参数后用新事件重试。'
+        if body.get('name') in {'read_file', 'write_file', 'apply_patch'} and 'path' not in body.get('arguments', {}):
+            message += ' 文件路径字段名为path，不能使用file_path。'
+        return {'schema_version': 1, 'status': 'error', 'error_code': error.code, 'data': {'message': message}}
     except (OSError, TimeoutError):
         if action in {'status', 'cancel'}:
             recovered = await asyncio.to_thread(recover_stopped, execution_id)

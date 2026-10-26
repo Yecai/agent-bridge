@@ -70,3 +70,5 @@ The tools service uses the existing private execution state root (or explicit AG
 Use tools status/cancel for an execution even if its original CLI observer is gone. The supervisor outlives the observer until lease expiry or explicit cancellation. Recovery checks durable PID/start-marker ownership and process-group absence; a missing observer alone is not stop evidence. Reused or unprovable process identity remains stop_unconfirmed. Recovery never fabricates a successful exit code for a command whose result was lost.
 
 A host must stop and reconcile the old execution before replacing it. Pending tool events from an old model turn must not be replayed on a new execution. Full commands run with local user privileges; file-root checks are not a shell sandbox.
+
+For `tools call` / `process_output`, an integer `wait_seconds` is a polling upper bound. The CLI caps values above 5 to 5 seconds before contacting the supervisor, including an already-running older supervisor. Continue with `next_cursor` while the command runs; the polling limit does not change its execution timeout or repeat the command.

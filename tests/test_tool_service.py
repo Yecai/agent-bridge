@@ -76,6 +76,39 @@ def test_exec_replay_is_same_receipt_after_process_exits(tool, spec):
     assert (spec.cwd / 'counter').read_text() == 'x'
 
 
+@pytest.mark.parametrize('wait_seconds', [8, 10, 15, 20, 30])
+def test_output_poll_accepts_long_wait_as_a_bounded_hint(tool, wait_seconds):
+    receipt = call(tool, 'exec', {'command': [sys.executable, '-c', 'print("done")']})
+    process_id = receipt['data']['process_id']
+    result = call(tool, 'process_output', {'process_id': process_id, 'wait_seconds': wait_seconds}, op='poll')
+    assert result['status'] not in {'error', 'outcome_unknown'}
+    assert result['data']['process_id'] == process_id
+    assert call(tool, 'process_output', {'process_id': process_id, 'wait_seconds': wait_seconds}, op='poll') == result
+
+
+def test_cli_bounds_wait_before_contacting_an_existing_supervisor(monkeypatch, tmp_path):
+    import asyncio
+    from agentbridge import tool_service
+    monkeypatch.setenv('AGENTBRIDGE_STATE', str(tmp_path/'state'))
+    seen = []
+    monkeypatch.setattr(tool_service, 'saved', lambda execution: {'mode': 'tools', 'revision': 0})
+    async def control(*args, **kwargs):
+        seen.append(args[3]['body'])
+        return {'schema_version': 1, 'status': 'ok'}
+    monkeypatch.setattr(tool_service, 'control', control)
+    body = {'name': 'process_output', 'arguments': {'process_id': 'p', 'wait_seconds': 30}}
+    asyncio.run(tool_service.request(str(uuid4()), 'call', body))
+    assert seen[0]['arguments']['wait_seconds'] == 5
+    assert body['arguments']['wait_seconds'] == 30
+
+
+def test_invalid_file_argument_is_a_known_error_for_existing_hosts(tool, spec):
+    reply = call(tool, 'write_file', {'file_path': 'bad.txt', 'content': 'no write', 'create': True})
+    assert reply['status'] == 'error' and reply['error_code'] == 'invalid_arguments'
+    assert 'path' in reply['data']['message'] and 'file_path' in reply['data']['message']
+    assert not (spec.cwd/'bad.txt').exists()
+
+
 def test_cancel_stops_process_groups_and_revokes_future_calls(tool):
     receipt = call(tool, 'exec', {'command': [sys.executable, '-c', 'import time; time.sleep(60)']})
     assert receipt['data']['state'] == 'running'
