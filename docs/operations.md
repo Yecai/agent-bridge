@@ -62,3 +62,11 @@ agentbridge export --execution EXECUTION_UUID --output /absolute/private/diagnos
 | log_path_tracked / audit_unavailable | Git 跟踪状态、磁盘空间和目录权限；先保留现场 |
 
 grep 单次超时十秒、每页最多 500 条；目前先收集 rg 输出再分页，超大搜索应按目录或模式缩小范围。图片、文件和输出的单页读取也有上限，继续读取使用返回的游标。
+
+## Local tool supervisor recovery
+
+The tools service uses the existing private execution state root (or explicit AGENTBRIDGE_STATE). Its immutable tools-request.json, request fingerprint and exact results/ cache are private control data, not public audit attachments. Never put the state root inside an authorized project directory or include it in diagnostic ZIPs.
+
+Use tools status/cancel for an execution even if its original CLI observer is gone. The supervisor outlives the observer until lease expiry or explicit cancellation. Recovery checks durable PID/start-marker ownership and process-group absence; a missing observer alone is not stop evidence. Reused or unprovable process identity remains stop_unconfirmed. Recovery never fabricates a successful exit code for a command whose result was lost.
+
+A host must stop and reconcile the old execution before replacing it. Pending tool events from an old model turn must not be replayed on a new execution. Full commands run with local user privileges; file-root checks are not a shell sandbox.

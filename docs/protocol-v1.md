@@ -59,3 +59,13 @@ stdout 为 JSONL，包含宿主身份、trace、execution、node、revision、so
 5. 业务转换和 action_receipt 在同一次任务原子更新中提交；重启不会重复交接或完成。
 
 `accepted` 不等于任务完成。ACK 丢失保留待确认状态；停止未知保留容量；未推送或远端祖先证明失败仍不能 finish。
+
+## Local tools extension v1
+
+Existing SSH RunSpec and commands retain their v1 contract. ToolsSpec shares the workspace/execution fields, sets `mode="tools"`, and excludes SSH/model fields. Host business callbacks are not accepted in ToolsSpec. `capabilities.tool_service.version=1` is the capability gate.
+
+The tools command group supports describe/start/call/result/freeze/renew/status/cancel. Discovery has no execution side effects. call requests contain name, arguments, event_id, op_id and control_revision. Operation identity belongs to the host, not the tool arguments. Replies carry schema_version=1 and the original ToolResult or control-state object. Input files must be regular files owned by the current user with mode 0600 and at most 8 MiB.
+
+A repeated operation with matching arguments returns its exact original private reply; conflicting arguments return operation_conflict. An issued operation lacking a proven reply returns outcome_unknown. Completed process state is queried through a new process_output event; replaying the original exec still returns the original start receipt. Freeze blocks new mutations, while result and process-output recovery remain available.
+
+Text reads use bounded pages; bridge process output uses 8192 bytes per channel per page and reports output_complete. Responses larger than 256 KiB from read tools return result_too_large without freezing. Mutation outcome uncertainty freezes authority. Cancel/status after supervisor death can establish recovered_process_groups evidence only after checking the saved supervisor identity and every owned process group.

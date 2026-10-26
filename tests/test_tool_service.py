@@ -83,3 +83,42 @@ def test_cancel_stops_process_groups_and_revokes_future_calls(tool):
     assert proof['stop_confirmed'] is True
     denied = call(tool, 'exec', {'command': ['true']}, op='again', check=False)
     assert denied.returncode != 0
+
+
+def test_dead_supervisor_can_reconcile_owned_process_stop(tool):
+    import signal
+    from agentbridge.procutil import group_alive
+    receipt = call(tool, 'exec', {'command': [sys.executable, '-c', 'import time; time.sleep(60)']})
+    supervisor = tool('status')
+    os.kill(supervisor['pid'], signal.SIGKILL)
+    proof = tool('cancel')
+    assert proof['stop_confirmed'] is True
+    assert proof['stop_evidence'] == 'recovered_process_groups'
+    assert not group_alive(receipt['data']['pid'])
+
+
+def test_escaped_process_output_can_be_paged_without_freezing(tool):
+    first = call(tool, 'exec', {'command': [sys.executable, '-c', 'import sys;sys.stdout.write("\\n"*65536);sys.stderr.write("\\n"*65536)']})
+    pid = first['data']['process_id']
+    cursor, output = 0, {'stdout': '', 'stderr': ''}
+    for _ in range(30):
+        result = call(tool, 'process_output', {'process_id': pid, 'cursor': cursor, 'wait_seconds': 1}, op=str(uuid4()))
+        assert result['status'] != 'error'
+        body = result['data']
+        for channel in output:
+            output[channel] += body[channel]
+        next_cursor = body['next_cursor']
+        if body['state'] == 'exited' and next_cursor == cursor:
+            break
+        cursor = next_cursor
+    assert {name: len(text) for name, text in output.items()} == {'stdout': 65536, 'stderr': 65536}
+    assert not tool('status')['frozen']
+
+
+def test_large_search_result_is_recoverable_and_does_not_freeze(tool):
+    call(tool, 'write_file', {'path': 'long.txt', 'content': 'MATCH' + 'x' * 300000, 'create': True}, op='large-file')
+    result = call(tool, 'grep', {'pattern': 'MATCH', 'limit': 1}, op='search')
+    assert result['error_code'] == 'result_too_large'
+    assert not tool('status')['frozen']
+    page = call(tool, 'read_file', {'path': 'long.txt', 'offset': 0, 'limit': 1024}, op='page')
+    assert page['data']['truncated'] and page['data']['next_offset'] == 1024

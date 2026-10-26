@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import stat
+import signal
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -13,7 +15,7 @@ from jsonschema import validate, ValidationError
 from . import state
 from .errors import BridgeError
 from .protocol import ToolsSpec, ToolMeta
-from .procutil import start_marker
+from .procutil import start_marker, group_alive
 from .runtime import Runtime, WRITE_TOOLS
 from .storage import write_json, file_lock, atomic_write
 from .supervisor import ControlServer, Lease, control
@@ -41,6 +43,53 @@ def saved(execution_id):
     return json.loads(path.read_text())
 
 
+def recover_stopped(execution_id):
+    """Reconcile dead supervision using every durable owned process group."""
+    root = state.execution(execution_id)
+    with file_lock(root / '.recovery.lock'):
+        row = saved(execution_id)
+        if row.get('stop_confirmed'):
+            return row
+        if start_marker(row['pid']) == row.get('start_marker'):
+            return None
+        spec = ToolsSpec.model_validate(load_private(root / 'tools-request.json'))
+        if spec.execution_id != execution_id:
+            raise BridgeError('stop_unconfirmed', '恢复请求归属不匹配')
+        groups = []
+        for path in sorted((spec.log_dir / 'processes').glob('*.json')):
+            process = json.loads(path.read_text())
+            if process.get('execution_id') != execution_id or type(process.get('pid')) is not int:
+                raise BridgeError('stop_unconfirmed', '进程账本归属不匹配')
+            pid = process['pid']
+            if group_alive(pid):
+                # A reused PID is not permission to signal an unrelated group.
+                if not process.get('start_marker') or start_marker(pid) != process['start_marker']:
+                    raise BridgeError('stop_unconfirmed', '原进程组身份无法核验')
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                deadline = time.monotonic() + 6
+                while group_alive(pid) and time.monotonic() < deadline:
+                    time.sleep(.05)
+                if group_alive(pid):
+                    if start_marker(pid) != process['start_marker']:
+                        raise BridgeError('stop_unconfirmed', '原进程组身份发生变化')
+                    os.killpg(pid, signal.SIGKILL)
+                    deadline = time.monotonic() + 3
+                    while group_alive(pid) and time.monotonic() < deadline:
+                        time.sleep(.05)
+            if group_alive(pid):
+                raise BridgeError('stop_unconfirmed', '恢复后仍有本机进程组存活')
+            process.update(state='exited', output_error='supervisor_lost', group_stopped=True)
+            write_json(path, process)
+            groups.append({'process_id': process['process_id'], 'pid': pid, 'group_stopped': True})
+        row.update(state='stopped', frozen=True, stop_confirmed=True,
+                   stop_evidence='recovered_process_groups', recovered_groups=groups)
+        write_json(root / 'status.json', row)
+        return row
+
+
 async def request(execution_id, action, body=None):
     row = saved(execution_id)
     if row.get('mode') != 'tools':
@@ -60,6 +109,10 @@ async def request(execution_id, action, body=None):
         return await control(state.address(execution_id), execution_id, row['revision'],
                              {'action': action, 'body': body or {}}, timeout=25)
     except (OSError, TimeoutError):
+        if action in {'status', 'cancel'}:
+            recovered = await asyncio.to_thread(recover_stopped, execution_id)
+            if recovered is not None:
+                return recovered
         if action == 'status':
             return {**row, 'state': 'stop_unconfirmed', 'stop_confirmed': False}
         raise BridgeError('supervisor_unavailable', '工具监督器不可达，禁止重放') from None
@@ -161,6 +214,8 @@ async def daemon(spec):
                 raise BridgeError('invalid_arguments', '单次读取上限为32768字节，请使用offset分页')
         if name == 'process_output' and arguments.get('wait_seconds', 1) > 5:
             raise BridgeError('invalid_arguments', '输出单次等待上限为5秒')
+        if name == 'process_output':
+            arguments['limit'] = 8192
         async with lock:
             old = results.lookup(op_id)
             if old:
@@ -182,8 +237,12 @@ async def daemon(spec):
                 reply = {'status': 'error', 'error_code': error.code, 'data': {'message': error.message}}
             reply = {'schema_version': 1, **reply}
             if len(json.dumps(reply, ensure_ascii=False).encode()) > 256 * 1024:
-                update(frozen=True)
-                raise BridgeError('outcome_unknown', '结果过大，需核对私有日志，禁止重放')
+                if name in {'workspace_context', 'read_file', 'list_directory', 'glob', 'grep', 'process_output'}:
+                    reply = {'schema_version': 1, 'status': 'error', 'error_code': 'result_too_large',
+                             'data': {'message': '结果超出单页预算，请缩小范围或limit；超大匹配行请用read_file的offset分页读取'}}
+                else:
+                    update(frozen=True)
+                    raise BridgeError('outcome_unknown', '结果过大，需核对私有日志，禁止重放')
             results.save(op_id, reply)
             return reply
 

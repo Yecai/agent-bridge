@@ -170,7 +170,7 @@ class ProcessManager:
         except Exception:
             self._revoke()
 
-    def output(self, process_id, cursor=0, wait_seconds=0):
+    def output(self, process_id, cursor=0, wait_seconds=0, limit=65536):
         with self.condition:
             item = self.rows.get(process_id)
             if item is None:
@@ -178,12 +178,17 @@ class ProcessManager:
             offsets = {"stdout": 0, "stderr": 0} if not cursor else json.loads(base64.urlsafe_b64decode(cursor))
             deadline = time.monotonic() + min(30, max(0, wait_seconds))
             while True:
-                outputs = {name: self.runtime.artifacts.output(f"{process_id}:{name}", offsets[name]) for name in offsets}
+                outputs = {name: self.runtime.artifacts.output(f"{process_id}:{name}", offsets[name], limit=limit) for name in offsets}
                 if item["done"] or any(v["data"] for v in outputs.values()) or time.monotonic() >= deadline:
                     break
                 self.condition.wait(timeout=min(0.1, max(0, deadline - time.monotonic())))
             next_cursor = base64.urlsafe_b64encode(json.dumps({name: value["next_cursor"] for name, value in outputs.items()}).encode()).decode()
-            return {**item["row"], "stdout": outputs["stdout"]["data"].decode("utf-8", "replace"),
+            manifest = self.runtime.artifacts.manifest()
+            complete = item['done'] and all(
+                outputs[name]['next_cursor'] >= sum(manifest['artifacts'][ref]['size']
+                    for ref in manifest['streams'].get(f'{process_id}:{name}', []))
+                for name in offsets)
+            return {**item["row"], "output_complete": complete, "stdout": outputs["stdout"]["data"].decode("utf-8", "replace"),
                     "stderr": outputs["stderr"]["data"].decode("utf-8", "replace"), "next_cursor": next_cursor,
                     "artifact_refs": outputs["stdout"]["artifact_refs"] + outputs["stderr"]["artifact_refs"]}
 
