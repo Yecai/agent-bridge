@@ -16,6 +16,9 @@ class Server(asyncssh.SSHServer):
     def server_requested(self, host, port):
         return host == '127.0.0.1'
 
+    def unix_connection_requested(self, path):
+        return True
+
 
 async def main():
     root=Path(sys.argv[1]).resolve()

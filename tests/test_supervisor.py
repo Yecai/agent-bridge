@@ -41,6 +41,33 @@ async def test_private_control_identity(tmp_path):
             assert False
 
 
+async def test_control_stream_reuses_connection_and_checks_every_frame(tmp_path):
+    import json
+    from agentbridge.supervisor import socket_path
+    calls = []
+
+    async def handle(frame):
+        calls.append(frame['action'])
+        return {'ok': frame['action']}
+
+    async with ControlServer(tmp_path / 'stream.sock', 'id', 2, handle):
+        reader, writer = await asyncio.open_unix_connection(str(socket_path(tmp_path / 'stream.sock')))
+        try:
+            for action, identity in [('status', 'id'), ('renew', 'id'), ('cancel', 'wrong')]:
+                writer.write(json.dumps({'execution_id': identity, 'revision': 2,
+                                         'request_id': action, 'action': action}).encode() + b'\n')
+                await writer.drain()
+                reply = json.loads(await asyncio.wait_for(reader.readline(), 1))
+                if identity == 'id':
+                    assert reply == {'result': {'ok': action}}
+                else:
+                    assert reply == {'error_code': 'control_lost'}
+            assert calls == ['status', 'renew']
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
 async def test_interactive_child_has_controlling_terminal(tmp_path):
     import time
     remote=RemoteExecution(tmp_path,'pty-execution',0,ttl=2)

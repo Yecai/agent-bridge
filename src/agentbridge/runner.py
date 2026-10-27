@@ -50,6 +50,8 @@ class Runner:
         self.rpc_lock = asyncio.Lock()
         self.connections, self.tunnel, self.local_port = None, None, None
         self.remote_cwd = None
+        self.remote_control_path = None
+        self.control_stream = None
         self.startup_output = bytearray()
         self.workspace_trusted = False
         self.bypass_accepted = False
@@ -122,6 +124,13 @@ class Runner:
     async def _rpc(self, frame):
         # Mouse motion can enqueue many inputs at once; keep SSH session channels bounded.
         async with self.rpc_lock:
+            if self.remote_control_path and frame['action'] != 'start':
+                try:
+                    return await self._socket_rpc(frame)
+                except asyncssh.ChannelOpenError:
+                    # The server can disable streamlocal forwarding. No bytes
+                    # were sent when opening failed, so the exec path is safe.
+                    self.remote_control_path = None
             process = await self.connection.create_process(shlex.join([self.remote_python, '-m', 'agentbridge', '_remote']))
             stdout, stderr = await asyncio.wait_for(process.communicate(json.dumps(frame)), 30)
             if self.connection.is_closed():
@@ -134,6 +143,31 @@ class Runner:
                 raise BridgeError(code, '远端控制请求失败')
             reply = json.loads(stdout)
             return reply
+
+    async def _socket_rpc(self, frame):
+        """Reuse a private SSH stream; never retry a possibly delivered input."""
+        if self.control_stream and self.control_stream[0] is not self.connection:
+            self.control_stream[2].close()
+            self.control_stream = None
+        if self.control_stream is None:
+            reader, writer = await asyncio.wait_for(
+                self.connection.open_unix_connection(self.remote_control_path, encoding='utf-8'), 30)
+            self.control_stream = (self.connection, reader, writer)
+        _, reader, writer = self.control_stream
+        try:
+            writer.write(json.dumps(frame) + '\n')
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), 30)
+            if not line:
+                raise OSError('SSH control stream closed')
+            reply = json.loads(line)
+            if reply.get('error_code'):
+                raise BridgeError(reply['error_code'], '远端控制请求失败')
+            return reply['result']
+        except BaseException:
+            writer.close()
+            self.control_stream = None
+            raise
 
     async def _reconnect(self, failed_connection):
         async with self.reconnect_lock:
@@ -181,6 +215,11 @@ class Runner:
             workspace = remote_workspace(home, spec)
             await sftp.makedirs(root, exist_ok=True)
             await sftp.chmod(root, 0o700)
+            control_path = root + '/control.sock'
+            if len(control_path.encode()) >= 90:
+                uid = (await sftp.stat(root)).uid
+                control_path = f'/tmp/agentbridge-{uid}/' + hashlib.sha256(control_path.encode()).hexdigest()[:32] + '.sock'
+            self.remote_control_path = control_path
             await sftp.makedirs(workspace, exist_ok=True)
             await sftp.chmod(workspace, 0o700)
             hook_script = str(Path(hooks.__file__).resolve())
