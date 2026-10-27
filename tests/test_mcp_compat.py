@@ -51,3 +51,43 @@ async def test_modern_probe_falls_back_to_legacy_tools(tmp_path, access):
             result = response.json()['result']
             assert not result.get('isError')
             assert result['structuredContent']['data']['cwd'] == str(runtime.spec.cwd.resolve())
+
+
+async def test_process_output_wait_keeps_control_loop_responsive(spec):
+    """Waiting for a quiet build must leave SSH control/lease timers running."""
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from agentbridge.server import build_mcp
+
+    runtime = Runtime(spec)
+    process_id = 'quiet-build'
+    runtime.processes.rows[process_id] = {
+        'row': {'process_id': process_id, 'state': 'running'}, 'done': False,
+    }
+    # Signal the real blocking wait so the check does not depend on thread startup.
+    waiting = threading.Event()
+    original_wait = runtime.processes.condition.wait
+
+    def wait(timeout=None):
+        waiting.set()
+        return original_wait(timeout)
+
+    runtime.processes.condition.wait = wait
+    mcp = build_mcp(runtime)
+    task = asyncio.create_task(mcp._tool_manager.call_tool(
+        'process_output', {'process_id': process_id, 'wait_seconds': 1},
+        context=SimpleNamespace(request_id='quiet-output')))
+    try:
+        while not waiting.is_set():
+            await asyncio.sleep(.01)
+        # A heartbeat coroutine must get a turn before the blocking wait ends.
+        await asyncio.sleep(.02)
+        assert not task.done(), 'tool wait blocked SSH control and lease timers'
+    finally:
+        with runtime.processes.condition:
+            runtime.processes.rows[process_id]['done'] = True
+            runtime.processes.condition.notify_all()
+        await task
+    assert runtime.enabled

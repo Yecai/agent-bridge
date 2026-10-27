@@ -20,12 +20,14 @@ def build_mcp(runtime):
                   transport_security=TransportSecuritySettings(allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
                                                                allowed_origins=["http://127.0.0.1:*", "http://localhost:*"]))
 
-    def call(name, arguments, ctx, op_id=None):
+    async def call(name, arguments, ctx, op_id=None):
         tool_call_id = str(ctx.request_id)
         identity = op_id or str(uuid5(UUID(runtime.spec.execution_id), "mcp:" + tool_call_id))
         meta = ToolMeta(execution_id=runtime.spec.execution_id, tool_call_id=tool_call_id,
                         op_id=identity, control_revision=runtime.spec.control_revision)
-        result = runtime.call(name, arguments, meta)
+        # FastMCP invokes sync tools on the event loop. Keep process waits,
+        # filesystem work and host callbacks off the SSH/lease control loop.
+        result = await asyncio.to_thread(runtime.call, name, arguments, meta)
         data = result.get('data', {})
         public = {**result, 'data': {k: v for k, v in data.items() if k != 'image'}}
         content = [TextContent(type='text', text=json.dumps(public, ensure_ascii=False))]
@@ -34,65 +36,65 @@ def build_mcp(runtime):
         return CallToolResult(content=content, structuredContent=public, isError=result['status'] == 'error')
 
     @mcp.tool()
-    def workspace_context(ctx: Context) -> CallToolResult:
+    async def workspace_context(ctx: Context) -> CallToolResult:
         """获取实际本机工作区、平台、项目规则和已授权资源。"""
-        return call("workspace_context", {}, ctx)
+        return await call("workspace_context", {}, ctx)
 
     @mcp.tool()
-    def read_file(path: str, ctx: Context, offset: int = 0, limit: int = 1048576) -> CallToolResult:
+    async def read_file(path: str, ctx: Context, offset: int = 0, limit: int = 1048576) -> CallToolResult:
         """读取本机文件；version 用于后续编辑的并发校验。"""
-        return call("read_file", {"path": path, "offset": offset, "limit": limit}, ctx)
+        return await call("read_file", {"path": path, "offset": offset, "limit": limit}, ctx)
 
     @mcp.tool()
-    def list_directory(ctx: Context, path: str = ".", cursor: int = 0, limit: int = 500) -> CallToolResult:
+    async def list_directory(ctx: Context, path: str = ".", cursor: int = 0, limit: int = 500) -> CallToolResult:
         """分页列出授权本机目录。"""
-        return call("list_directory", {"path": path, "cursor": cursor, "limit": limit}, ctx)
+        return await call("list_directory", {"path": path, "cursor": cursor, "limit": limit}, ctx)
 
     @mcp.tool()
-    def glob(pattern: str, ctx: Context, path: str = ".", cursor: str | None = None, limit: int = 500) -> CallToolResult:
+    async def glob(pattern: str, ctx: Context, path: str = ".", cursor: str | None = None, limit: int = 500) -> CallToolResult:
         """按模式在本机查找文件；需要递归时使用 **/。"""
-        return call("glob", {"pattern": pattern, "path": path, "cursor": cursor, "limit": limit}, ctx)
+        return await call("glob", {"pattern": pattern, "path": path, "cursor": cursor, "limit": limit}, ctx)
 
     @mcp.tool()
-    def grep(pattern: str, ctx: Context, path: str = ".", cursor: str | None = None, limit: int = 500) -> CallToolResult:
+    async def grep(pattern: str, ctx: Context, path: str = ".", cursor: str | None = None, limit: int = 500) -> CallToolResult:
         """在授权本机目录搜索文本，返回文件、行号和分页游标。"""
-        return call("grep", {"pattern": pattern, "path": path, "cursor": cursor, "limit": limit}, ctx)
+        return await call("grep", {"pattern": pattern, "path": path, "cursor": cursor, "limit": limit}, ctx)
 
     @mcp.tool()
-    def write_file(path: str, content: str, ctx: Context, expected_version: str | None = None,
+    async def write_file(path: str, content: str, ctx: Context, expected_version: str | None = None,
                    create: bool = False, op_id: str | None = None) -> CallToolResult:
         """写本机文件。新文件 create=true；覆盖必须传 read_file 得到的 expected_version。"""
-        return call("write_file", {"path": path, "content": content, "expected_version": expected_version, "create": create}, ctx, op_id)
+        return await call("write_file", {"path": path, "content": content, "expected_version": expected_version, "create": create}, ctx, op_id)
 
     @mcp.tool()
-    def apply_patch(path: str, expected_version: str, old: str, new: str, ctx: Context, op_id: str | None = None) -> CallToolResult:
+    async def apply_patch(path: str, expected_version: str, old: str, new: str, ctx: Context, op_id: str | None = None) -> CallToolResult:
         """用唯一精确片段替换本机文件，版本变化时拒绝覆盖。"""
-        return call("apply_patch", {"path": path, "expected_version": expected_version, "old": old, "new": new}, ctx, op_id)
+        return await call("apply_patch", {"path": path, "expected_version": expected_version, "old": old, "new": new}, ctx, op_id)
 
     @mcp.tool()
-    def exec(command: str | list[str], ctx: Context, cwd: str = ".", timeout: int = 1800, op_id: str | None = None) -> CallToolResult:
+    async def exec(command: str | list[str], ctx: Context, cwd: str = ".", timeout: int = 1800, op_id: str | None = None) -> CallToolResult:
         """在本机执行Git、构建和测试；验证优先传argv数组。字符串使用Bash pipefail。返回process_id后用process_output取完整输出。"""
-        return call("exec", {"command": command, "cwd": cwd, "timeout": timeout}, ctx, op_id)
+        return await call("exec", {"command": command, "cwd": cwd, "timeout": timeout}, ctx, op_id)
 
     @mcp.tool()
-    def process_output(process_id: str, ctx: Context, cursor: str | int = 0, wait_seconds: int = 1) -> CallToolResult:
+    async def process_output(process_id: str, ctx: Context, cursor: str | int = 0, wait_seconds: int = 1) -> CallToolResult:
         """读取本次执行的命令输出。传回 next_cursor 继续读取，不重复运行命令。"""
-        return call("process_output", {"process_id": process_id, "cursor": cursor, "wait_seconds": wait_seconds}, ctx)
+        return await call("process_output", {"process_id": process_id, "cursor": cursor, "wait_seconds": wait_seconds}, ctx)
 
     @mcp.tool()
-    def process_stop(process_id: str, ctx: Context, reason: str = "cancelled", op_id: str | None = None) -> CallToolResult:
+    async def process_stop(process_id: str, ctx: Context, reason: str = "cancelled", op_id: str | None = None) -> CallToolResult:
         """停止本次命令进程组并确认退出。"""
-        return call("process_stop", {"process_id": process_id, "reason": reason}, ctx, op_id)
+        return await call("process_stop", {"process_id": process_id, "reason": reason}, ctx, op_id)
 
     @mcp.tool()
-    def dev_handoff(plan: str, spec: str, ctx: Context, op_id: str | None = None) -> CallToolResult:
+    async def dev_handoff(plan: str, spec: str, ctx: Context, op_id: str | None = None) -> CallToolResult:
         """提交本机规格和计划的交接请求；accepted 后停止进一步写操作。"""
-        return call("dev_handoff", {"plan": plan, "spec": spec}, ctx, op_id)
+        return await call("dev_handoff", {"plan": plan, "spec": spec}, ctx, op_id)
 
     @mcp.tool()
-    def dev_finish(summary: str, ctx: Context, op_id: str | None = None) -> CallToolResult:
+    async def dev_finish(summary: str, ctx: Context, op_id: str | None = None) -> CallToolResult:
         """由本机宿主核验真实交付证明后完成任务。"""
-        return call("dev_finish", {"summary": summary}, ctx, op_id)
+        return await call("dev_finish", {"summary": summary}, ctx, op_id)
 
     for name in (set(READ_NAMES) | {"write_file", "apply_patch", "exec", "process_output", "process_stop", "dev_handoff", "dev_finish"}) - runtime.allowed_tools:
         mcp.remove_tool(name)
