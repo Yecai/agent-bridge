@@ -49,6 +49,12 @@ def ensure_request_identity(spec):
             raise BridgeError('execution_conflict', '同一执行身份不能更改运行配置')
         if not path.exists():
             atomic_write(path, fingerprint.encode())
+        # Keep business text in the caller's data domain, outside exported logs.
+        # The global state contains only a pointer and the existing fingerprint.
+        request = spec.log_dir.parent / ('.agentbridge-recovery-' + spec.execution_id) / 'request.json'
+        if not request.exists():
+            atomic_write(request, private_request(spec).encode())
+        atomic_write(root / 'request-path', str(request).encode())
 
 
 def saved_status(execution_id):
@@ -59,7 +65,7 @@ def saved_status(execution_id):
     return json.loads(path.read_text())
 
 
-async def command(execution_id, action, **fields):
+async def command(execution_id, action, *, request_path=None, **fields):
     from . import state
     from .supervisor import control
     saved = saved_status(execution_id)
@@ -75,7 +81,12 @@ async def command(execution_id, action, **fields):
             return {'data': base64.b64encode(output['data']).decode(), 'next_cursor': output['next_cursor']}
     try:
         return await control(state.address(execution_id), execution_id, saved['revision'], {'action': action, **fields})
-    except (OSError, TimeoutError):
+    except (OSError, TimeoutError, json.JSONDecodeError):
+        if action == 'cancel':
+            from .recovery import recover
+            recovered = await asyncio.to_thread(recover, execution_id, request_path)
+            if recovered is not None:
+                return recovered
         if action == 'status':
             return {**saved, 'state': saved['state'] if saved.get('stop_confirmed') else 'stop_unconfirmed'}
         raise BridgeError('supervisor_unavailable', '监督器不可达；执行结果不能重放') from None
@@ -281,6 +292,8 @@ def main():
     for name in ('status', 'cancel', 'logs', 'export'):
         item = sub.add_parser(name)
         item.add_argument('--execution', required=True)
+        if name == 'cancel':
+            item.add_argument('--request-file', help='旧执行停止恢复所需的原始私有请求')
         if name == 'logs':
             item.add_argument('--cursor', type=int, default=0)
         if name == 'export':
@@ -301,7 +314,8 @@ def main():
             result = trust(spec.target, args.challenge, args.fingerprint) if args.command == 'trust-host' else doctor(spec, test_tools=args.test_tools)
             print(json.dumps(asyncio.run(result), ensure_ascii=False))
         elif args.command in {'status', 'cancel'}:
-            print(json.dumps(asyncio.run(command(args.execution, args.command)), ensure_ascii=False))
+            print(json.dumps(asyncio.run(command(args.execution, args.command,
+                request_path=getattr(args, 'request_file', None))), ensure_ascii=False))
         else:
             from .audit import AuditLog
             row = saved_status(args.execution)

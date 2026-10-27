@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 
 def test_invalid_cli_request_is_safe(tmp_path):
@@ -35,6 +36,24 @@ def test_local_execution_request_identity_is_immutable(spec,tmp_path,monkeypatch
     ensure_request_identity(spec)
     with pytest.raises(BridgeError,match='execution_conflict'):
         ensure_request_identity(spec.model_copy(update={'prompt':'changed'}))
+
+
+def test_execution_keeps_private_request_for_stop_recovery(spec, tmp_path, monkeypatch):
+    from agentbridge import cli, state
+    monkeypatch.setenv('AGENTBRIDGE_STATE', str(tmp_path / 'state'))
+    spec.prompt = 'private business content for this task'
+    cli.ensure_request_identity(spec)
+    state_root = state.execution(spec.execution_id)
+    path = Path((state_root / 'request-path').read_text())
+    assert path.exists(), '停止恢复需要持久保存原始 SSH 目标与执行身份'
+    assert path.is_relative_to(spec.log_dir.parent)
+    assert not path.is_relative_to(spec.log_dir)
+    assert not (state_root / 'request.json').exists()
+    assert all(spec.prompt not in item.read_text() for item in state_root.iterdir() if item.is_file())
+    assert path.stat().st_mode & 0o777 == 0o600
+    restored = cli.load_request(path)
+    assert restored.execution_id == spec.execution_id
+    assert restored.target.password.get_secret_value() == 'fixture-secret'
 
 
 async def test_local_daemon_keeps_interactive_input_until_remote_ready(spec,tmp_path,monkeypatch):
