@@ -73,7 +73,9 @@ class Runner:
                 self.runtime.audit.append('claude.bypass_accept', 'ok', {'cwd': self.remote_cwd})
                 await self.remote('input', data=base64.b64encode(b'\x1b[B\r').decode())
             return
-        if self.runtime.session_ready or ready_screen:
+        # SessionStart can arrive before protocol fallback and tools/list finish.
+        # Submitting then lets Claude start a turn with no bridge tools attached.
+        if self.runtime.mcp_ready and (self.runtime.session_ready or ready_screen):
             self.startup_output.clear()
             if self.spec.prompt and not self.initial_prompt_sent:
                 self.initial_prompt_sent = True
