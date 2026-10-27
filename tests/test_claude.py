@@ -78,6 +78,9 @@ async def test_interactive_prompt_waits_for_controlled_session_start(spec):
     assert len(inputs)==1
     runner.runtime.hook({'hook_event_name':'SessionStart','session_id':spec.session_id})
     await runner._interactive_startup(b'')
+    assert len(inputs)==1
+    runner.runtime.mcp_ready=True
+    await runner._interactive_startup(b'')
     assert inputs[-2].endswith(b'initial prompt\x1b[201~')
     assert inputs[-1]==b'\r'
     await runner._interactive_startup(b'')

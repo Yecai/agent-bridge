@@ -58,6 +58,7 @@ agentbridge export --execution EXECUTION_UUID --output /absolute/private/diagnos
 | auth / authentication_failed | VPS 的上游地址、密钥、账户权限；不要只看 auth status |
 | schema_result_missing | 模型是否返回 StructuredOutput、hook 是否放行格式化工具 |
 | 交互启动没有任务 | 查看原生初始化界面、MCP 握手和 hooks；不会在未知界面自动输入确认 |
+| 新版 Claude 启动后声称没有 MCP 工具 | 首条任务须同时等待会话就绪和 `tools/list` 成功；`SessionStart` 不代表工具已接入。新版 `server/discover` 探测收到旧 SDK 的 400 后，可正常回退到 `2025-11-25` 握手，不应据此宣称不兼容，也不能假报支持新版协议 |
 | stop_unconfirmed | 保留容量，核对两端监督器、进程组和原始执行身份 |
 | log_path_tracked / audit_unavailable | Git 跟踪状态、磁盘空间和目录权限；先保留现场 |
 
