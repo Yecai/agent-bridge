@@ -19,6 +19,9 @@ class Server(asyncssh.SSHServer):
     def server_requested(self, host, port):
         return host == '127.0.0.1'
 
+    def unix_connection_requested(self, path):
+        return True
+
 
 @pytest.mark.parametrize('disconnect', [False, True])
 async def test_real_ssh_runner_and_local_tools(tmp_path, monkeypatch, disconnect):

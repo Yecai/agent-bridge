@@ -31,3 +31,11 @@ MCP 仅绑定回环地址，每次执行有独立 bearer。只读执行仅开放
 宿主接入覆盖八个自动开发节点，以及 devix 的计划、执行两个交互节点。使用和恢复说明见 [操作手册](docs/operations.md)，边界契约见 [协议 v1](docs/protocol-v1.md)，验证来源及限制见 [验证记录](docs/validation-current.md)。
 
 CLI 参数及 hooks 依据：[Claude CLI](https://code.claude.com/docs/en/cli-reference)、[Claude hooks](https://code.claude.com/docs/en/hooks)。部署前还需检查实际安装版本。
+
+## Local tool service
+
+`agentbridge capabilities` reports the versioned `tool_service` contract without starting SSH or a model. `agentbridge tools describe --access read|full` exports the same file/process signatures used by MCP.
+
+A host can run `agentbridge tools start --request-file <private-json>` with a `ToolsSpec` (`mode: tools`, workspace roots and execution identity; no SSH target). Invoke tools through `tools call --execution <uuid> --request-file <private-json>`. Use `tools result --execution <uuid> --op-id <stable-id>` to recover the exact original reply. The service also provides freeze, renew, status and cancel.
+
+The host must renew the 60-second lease; expiry revokes authority and stops owned process groups. A dead supervisor can reconcile stop evidence from durable process records. `process_output` provides byte cursors and `output_complete`; read until the process exits and output is complete. Unknown mutation results must be reconciled rather than re-executed. Private exact result caches are excluded from public audit exports.

@@ -48,13 +48,21 @@ class ControlServer:
 
     async def _client(self, reader, writer):
         try:
-            frame = json.loads(await asyncio.wait_for(reader.readline(), 15))
-            if frame.get('execution_id') != self.execution_id or frame.get('revision') != self.revision:
-                raise BridgeError('control_lost', '执行身份或控制版本不匹配')
-            if not isinstance(frame.get('request_id'), str):
-                raise BridgeError('invalid_request', '控制请求身份缺失')
-            result = await self.handler(frame)
-            writer.write(json.dumps({'result': result}, ensure_ascii=False).encode() + b'\n')
+            while True:
+                try:
+                    line = await asyncio.wait_for(reader.readline(), 15)
+                except TimeoutError:
+                    break
+                if not line:
+                    break
+                frame = json.loads(line)
+                if frame.get('execution_id') != self.execution_id or frame.get('revision') != self.revision:
+                    raise BridgeError('control_lost', '执行身份或控制版本不匹配')
+                if not isinstance(frame.get('request_id'), str):
+                    raise BridgeError('invalid_request', '控制请求身份缺失')
+                result = await self.handler(frame)
+                writer.write(json.dumps({'result': result}, ensure_ascii=False).encode() + b'\n')
+                await writer.drain()
         except Exception as exc:
             code = exc.code if isinstance(exc, BridgeError) else 'control_failed'
             writer.write(json.dumps({'error_code': code}).encode() + b'\n')

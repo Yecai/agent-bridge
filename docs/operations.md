@@ -33,6 +33,10 @@ CLI、本机监督器和远端监督器分别运行。CLI 心跳停止后，本�
 
 `stop_unconfirmed/outcome_unknown` 时保留池占用。先保留诊断，再核对两端执行状态、PGID 和启动标记。不要清空状态文件、重复原命令或随意 kill 一个复用的 PID。远端监督器不可达时，须核验原执行进程是否仍存在；没有证据不能手动标为停止成功。
 
+`cancel` 在本机监督器退出后会自动恢复停止：读取私有缓存中的原始请求，校验执行身份、控制版本和请求指纹，通过已登记 SSH 主机核验远端，并按进程启动标记清理两端所属进程组。请求缓存放在调用方日志目录的同级私有目录，保持原业务数据域并排除在日志导出之外；全局执行状态只存路径指针与指纹。远端恢复只发送固定的标准库程序，不重新部署、不启动模型。证据写入本机执行状态，原始失败退出码保持不变。普通 `status` 查询不会触发 SSH、发信号或恢复。
+
+旧执行尚无请求缓存时，可传 `agentbridge cancel --execution EXECUTION_UUID --request-file /absolute/original/request.json`；宿主会自动传入任务保留的原始私有请求。请求缺失、指纹或控制版本不符、PID 归属不明、远端不可达时继续保留停止未知状态与容量，恢复连接后再次终止即可重试。
+
 ## 日志与导出
 
 ```sh
@@ -63,3 +67,17 @@ agentbridge export --execution EXECUTION_UUID --output /absolute/private/diagnos
 | log_path_tracked / audit_unavailable | Git 跟踪状态、磁盘空间和目录权限；先保留现场 |
 
 grep 单次超时十秒、每页最多 500 条；目前先收集 rg 输出再分页，超大搜索应按目录或模式缩小范围。图片、文件和输出的单页读取也有上限，继续读取使用返回的游标。
+
+## Local tool supervisor recovery
+
+The tools service uses the existing private execution state root (or explicit AGENTBRIDGE_STATE). Its immutable tools-request.json, request fingerprint and exact results/ cache are private control data, not public audit attachments. Never put the state root inside an authorized project directory or include it in diagnostic ZIPs.
+
+Use tools status/cancel for an execution even if its original CLI observer is gone. The supervisor outlives the observer until lease expiry or explicit cancellation. Recovery checks durable PID/start-marker ownership and process-group absence; a missing observer alone is not stop evidence. Reused or unprovable process identity remains stop_unconfirmed. Recovery never fabricates a successful exit code for a command whose result was lost.
+
+A host must stop and reconcile the old execution before replacing it. Pending tool events from an old model turn must not be replayed on a new execution. Full commands run with local user privileges; file-root checks are not a shell sandbox.
+
+For `tools call` / `process_output`, an integer `wait_seconds` is a polling upper bound. The CLI caps values above 5 to 5 seconds before contacting the supervisor, including an already-running older supervisor. Continue with `next_cursor` while the command runs; the polling limit does not change its execution timeout or repeat the command.
+
+Argument rejections include the missing required field names and the allowed fields from the actual tool schema. Input values and file contents are not echoed. For example, an `apply_patch` call using `new_string` is told that the required field is `new`; aliases are not silently applied to mutations.
+
+String commands run in Bash with `pipefail`: a failed test before `| tail` remains a failed process. Prefer argv arrays for verification and retain the complete log or structured report. If a pipeline intentionally ignores a stage failure, handle that explicitly in the command. This default applies to newly started supervisors; running supervisors retain their loaded code.
