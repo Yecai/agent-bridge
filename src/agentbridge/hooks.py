@@ -8,6 +8,8 @@ from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHand
 from uuid import UUID, uuid5
 
 MUTATIONS = {'write_file', 'apply_patch', 'exec', 'process_stop', 'dev_handoff', 'dev_finish'}
+# Built-ins that only read VPS-side skills/plugins or keep in-session state; none touch a file system the model controls.
+SERVER_TOOLS = ('Skill', 'TodoWrite')
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -23,7 +25,8 @@ def decide(event, execution_id, *, allow_structured=False):
     if event.get('hook_event_name') != 'PreToolUse':
         return {}
     name = event.get('tool_name', '')
-    permitted = name.startswith('mcp__local__') or (name == 'StructuredOutput' and allow_structured)
+    permitted = (name.startswith('mcp__local__') or name in SERVER_TOOLS
+                 or (name == 'StructuredOutput' and allow_structured))
     output = {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow' if permitted else 'deny'}
     if output['permissionDecision'] == 'deny':
         output['permissionDecisionReason'] = '只能通过 AgentBridge 操作本机项目'
@@ -38,7 +41,7 @@ def decide(event, execution_id, *, allow_structured=False):
 def settings(command):
     names = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'SessionEnd']
     return {'hooks': {name: [{'matcher': '*', 'hooks': [{'type': 'command', 'command': command, 'timeout': 10}]}]
-                      for name in names}, 'enabledPlugins': {}, 'enableAllProjectMcpServers': False,
+                      for name in names}, 'enableAllProjectMcpServers': False,
             'skipDangerousModePermissionPrompt': True}
 
 

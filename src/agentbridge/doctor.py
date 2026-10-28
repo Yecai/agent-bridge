@@ -15,7 +15,7 @@ from .ssh import connect_target
 from .storage import atomic_write, file_lock, private_dir, write_json
 
 CHECKS = ('ssh', 'host_identity', 'python', 'claude_auth', 'mcp_roundtrip', 'print_schema', 'interactive_audit', 'stop_confirmation')
-REQUIRED_FLAGS = ('--tools', '--strict-mcp-config', '--settings', '--setting-sources', '--disable-slash-commands',
+REQUIRED_FLAGS = ('--tools', '--strict-mcp-config', '--settings', '--setting-sources',
                   '--json-schema', '--session-id', '--resume', '--dangerously-skip-permissions')
 PROBE = r'''
 import json,subprocess,sys

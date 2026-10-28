@@ -10,8 +10,10 @@ def test_argv_modes_secrets_and_prompt(spec, tmp_path):
     spec.session_id = str(uuid4())
     spec.prompt = "中文 '$HOME' `echo bad`"
     args = build_argv(spec, tmp_path / 'mcp.json', tmp_path / 'settings.json')
-    assert args[args.index('--tools') + 1] == ''
-    assert args[args.index('--setting-sources') + 1] == ''
+    assert args[args.index('--tools') + 1] == 'Skill,TodoWrite'
+    assert args[args.index('--setting-sources') + 1] == 'user'
+    assert args[args.index('--allowedTools') + 1] == 'mcp__local__*,Skill,TodoWrite'
+    assert '--disable-slash-commands' not in args
     assert '--strict-mcp-config' in args
     assert '--output-format' in args
     assert spec.prompt not in args
@@ -30,6 +32,9 @@ def test_hook_uses_trusted_tool_identity(spec):
     assert output['updatedInput']['op_id'] == operation_id(spec.execution_id, 'use-1')
     assert output['permissionDecision'] == 'allow'
     assert decide({**event, 'tool_name': 'Bash'}, spec.execution_id)['hookSpecificOutput']['permissionDecision'] == 'deny'
+    for server_tool in ['Skill', 'TodoWrite']:
+        allowed = decide({'hook_event_name': 'PreToolUse', 'tool_name': server_tool, 'tool_input': {}}, spec.execution_id)
+        assert allowed['hookSpecificOutput'] == {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow'}
 
 
 def test_json_lines_retains_partial_and_reports_invalid():
